@@ -1,0 +1,6 @@
+{
+  "name": "LocalVault - Dual iPhone Auto Wi-Fi SSD Photo Backup",
+  "description": "Automatic, periodic Wi-Fi photo & video backup from 2 iPhones directly to your PC's external SSD with deduplication, iOS Shortcuts automation, and live gallery.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
