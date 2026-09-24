@@ -19,6 +19,28 @@ const PORT = parseInt(process.env.PORT || '3000', 10);
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
+// Expose public folder statically so downloading localvault-pc-server.js always serves pure raw JS
+const PUBLIC_DIR = path.resolve(__dirname, 'public');
+app.use(express.static(PUBLIC_DIR));
+
+app.get('/localvault-pc-server.js', (req, res) => {
+  const filePath = path.join(PUBLIC_DIR, 'localvault-pc-server.js');
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.sendFile(filePath);
+});
+
+app.get('/api/download/server.js', (req, res) => {
+  const filePath = path.join(PUBLIC_DIR, 'localvault-pc-server.js');
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.sendFile(filePath);
+});
+
+app.get('/localvault-pc-server.py', (req, res) => {
+  const filePath = path.join(PUBLIC_DIR, 'localvault-pc-server.py');
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.sendFile(filePath);
+});
+
 // Base data directories
 const DATA_DIR = path.resolve(__dirname, 'storage');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
@@ -919,6 +941,22 @@ app.get('/api/shortcuts/recipe/:deviceId', (req, res) => {
 
 // Setup Vite or static serving
 async function startServer() {
+  const publicJsPath = path.join(PUBLIC_DIR, 'localvault-pc-server.js');
+  const publicPyPath = path.join(PUBLIC_DIR, 'localvault-pc-server.py');
+
+  // Intercept scripts explicitly before Vite/SPA handles it
+  app.get(['/localvault-pc-server.js', '/api/download/server.js', '/localvault-pc-server.txt'], (req, res) => {
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', 'inline; filename="localvault-pc-server.js"');
+    res.sendFile(publicJsPath);
+  });
+
+  app.get(['/localvault-pc-server.py', '/api/download/server.py'], (req, res) => {
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', 'inline; filename="localvault-pc-server.py"');
+    res.sendFile(publicPyPath);
+  });
+
   if (process.env.NODE_ENV === 'production') {
     const distPath = path.resolve(__dirname, 'dist');
     app.use(express.static(distPath));
@@ -931,6 +969,20 @@ async function startServer() {
       server: { middlewareMode: true },
       appType: 'spa',
     });
+    
+    // Mount custom routes BEFORE vite.middlewares
+    app.use((req, res, next) => {
+      if (req.path === '/localvault-pc-server.js' || req.path === '/api/download/server.js') {
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        return res.sendFile(publicJsPath);
+      }
+      if (req.path === '/localvault-pc-server.py') {
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        return res.sendFile(publicPyPath);
+      }
+      next();
+    });
+
     app.use(vite.middlewares);
   }
 

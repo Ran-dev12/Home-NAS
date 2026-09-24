@@ -33,22 +33,13 @@ export const PcSetupGuide: React.FC<PcSetupGuideProps> = ({ config, onOpenSettin
     setTimeout(() => setCopiedScript(null), 2000);
   };
 
-  const nodeScript = `# 1. Create a folder on your PC and enter it:
-mkdir LocalVault-SSD
-cd LocalVault-SSD
+  const nodeScript = `# If you are already inside E:\\LocalVault-SSD, simply download the script:
+Invoke-WebRequest -Uri "${window.location.origin}/localvault-pc-server.js" -OutFile "localvault-pc-server.js"
 
-# 2. Download the ready-to-run PC server script:
-curl -O ${window.location.origin}/localvault-pc-server.js
+# (You already ran 'npm install express multer' successfully!)
 
-# 3. Install the 2 lightweight dependencies:
-npm install express multer
-
-# 4. Set your SSD drive letter (Windows: D:, E: etc.) and run:
-# Windows PowerShell:
-$env:SSD_PATH = "D:\\iPhone_Photos_SSD"; node localvault-pc-server.js
-
-# Mac / Linux:
-SSD_PATH="/Volumes/My_SSD/iPhone_Photos" node localvault-pc-server.js`;
+# Start the server on your E: SSD:
+node localvault-pc-server.js`;
 
   const pythonScript = `# 1. Create a folder on your PC:
 mkdir LocalVault-SSD
