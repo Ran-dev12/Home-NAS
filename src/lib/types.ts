@@ -83,6 +83,8 @@ export interface Device {
   totalBytes: number;
   orderWarning: boolean;
   backup: BackupChoice;
+  /** Date Taken (UTC ISO) of items the phone could not read, skipped so later backups get through. */
+  unreadable?: string[];
 }
 
 /** What a phone backs up. Photos, videos and screenshots come from the Photos app; files from the Files app. */

@@ -89,8 +89,8 @@ def request(uid: str, path: str, method: str = "GET", form: list[dict] | None = 
 
 
 def build(server: str, limit: int) -> dict:
-    t_server, t_key, sync, since, dates, photos, fmt, upload, done, message = (new_id() for _ in range(10))
-    loop = new_id()
+    t_server, t_key, sync, since, dates, photos, fmt, check, go, upload, done, message = (new_id() for _ in range(12))
+    loop, gate = new_id(), new_id()
     actions = [
         action("gettext", UUID=t_server, WFTextActionText=server),
         action("setvariable", WFVariableName="Server", WFInput=attachment(output(t_server, "Text"))),
@@ -132,12 +132,26 @@ def build(server: str, limit: int) -> dict:
             WFDateFormatStyle="ISO 8601",
             WFISO8601IncludeTime=True,
         ),
+        # Ask first, using only Date Taken (readable even for a video iOS cannot export). Shortcuts cannot catch
+        # errors, so an unreadable item would stop every run; after two such runs the NAS answers "skip".
+        # Upload unless told to skip, so the shortcut also works with a NAS that predates /check.
+        request(check, "/api/device/check", "POST", [text_field("takenAt", text(OBJ, {0: output(fmt, "Formatted Date")}))]),
+        action("getvalueforkey", UUID=go, WFDictionaryKey="skip", WFInput=attachment(output(check, "Contents of URL"))),
+        action(
+            "conditional",
+            GroupingIdentifier=gate,
+            WFControlFlowMode=0,
+            WFCondition=100,  # has any value: skip, nothing to do
+            WFInput={"Type": "Variable", "Variable": attachment(output(go, "Dictionary Value"))},
+        ),
+        action("conditional", GroupingIdentifier=gate, WFControlFlowMode=1),  # Otherwise: upload
         request(
             upload,
             "/api/device/upload",
             "POST",
             [file_field("file", var("Repeat Item")), text_field("takenAt", text(OBJ, {0: output(fmt, "Formatted Date")}))],
         ),
+        action("conditional", GroupingIdentifier=gate, WFControlFlowMode=2, UUID=new_id()),
         action("repeat.each", GroupingIdentifier=loop, WFControlFlowMode=2, UUID=new_id()),
         # Commits the bookmark and returns "Backed up 12 new items …".
         request(done, "/api/device/sync-complete", "POST"),

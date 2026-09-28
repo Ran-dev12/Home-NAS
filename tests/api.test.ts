@@ -369,6 +369,57 @@ test('phone backup choices: videos and screenshots get their own folders; turned
   assert.equal(nothing.status, 400, 'at least one thing must stay on');
 });
 
+test('an item the phone cannot read is skipped after two failed runs instead of blocking every backup', async () => {
+  const { srv, admin } = await fresh('phone-unreadable');
+  const created = await admin.post('/api/devices', { name: 'Test iPhone', startFrom: 'everything' });
+  const phone = new Client(srv.base);
+  phone.csrf = false;
+  const auth = { authorization: `Bearer ${created.json.token}` };
+  const check = (takenAt: string) => {
+    const fd = new FormData(); // Shortcuts sends a Form body
+    fd.append('takenAt', takenAt);
+    return phone.req('POST', '/api/device/check', fd, auth);
+  };
+  const upload = (name: string, takenAt: string) => {
+    const fd = new FormData();
+    fd.append('file', new Blob([name], { type: 'image/heic' }), name);
+    fd.append('takenAt', takenAt);
+    return phone.req('POST', '/api/device/upload', fd, auth);
+  };
+  const A = '2026-09-01T10:00:00+04:00';
+  const VIDEO = '2026-09-01T11:00:00+04:00'; // iOS cannot export it: the phone dies on its upload
+  const B = '2026-09-01T12:00:00+04:00';
+  // One run: A uploads, the video is cleared but never arrives (the shortcut stopped).
+  const run = async () => {
+    await phone.req('GET', '/api/device/sync-state', undefined, auth);
+    assert.equal((await check(A)).json.upload, 'yes');
+    await upload('IMG_A.HEIC', A);
+    return check(VIDEO);
+  };
+  const first = await run();
+  assert.equal(first.json.upload, 'yes', 'first failure: try again');
+  assert.equal(first.json.skip, undefined, 'no "skip" value, so the shortcut uploads');
+  assert.equal((await run()).json.upload, 'yes', 'second failure: one more try');
+  const third = await run();
+  assert.equal(third.json.upload, undefined);
+  assert.match(third.json.skip, /could not be read/);
+  // The backup carries on past it.
+  assert.equal((await check(B)).json.upload, 'yes');
+  assert.equal((await upload('IMG_B.HEIC', B)).json.status, 'stored');
+  const done = await phone.req('POST', '/api/device/sync-complete', undefined, auth);
+  assert.equal(done.json.unreadable, 1);
+  assert.match(done.json.message, /1 could not be read on the phone/);
+  assert.equal(done.json.backedUpThrough, '2026-09-01T08:00:00.000Z');
+  const listed = (await admin.get('/api/devices')).json.devices[0];
+  assert.deepEqual(listed.unreadable, ['2026-09-01T07:00:00.000Z']);
+
+  // Plain form encoding works too, and "Back up again from…" gives skipped items another chance.
+  await admin.patch(`/api/devices/${created.json.device.id}`, { resetFrom: '2026-09-01' });
+  const retry = await phone.req('POST', '/api/device/check', new URLSearchParams({ takenAt: VIDEO }), auth);
+  assert.equal(retry.json.upload, 'yes');
+  assert.deepEqual((await admin.get('/api/devices')).json.devices[0].unreadable, []);
+});
+
 test('files backup: only new or changed files are uploaded, into Files/<folder>', async () => {
   const { srv, admin } = await fresh('phone-files');
   const created = await admin.post('/api/devices', { name: 'Test iPad', backup: { photos: false, videos: false, screenshots: false, files: true } });

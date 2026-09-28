@@ -287,7 +287,22 @@ export function ShortcutGuide(p: GuideProps) {
                   </li>
                   <li className="flex flex-col gap-2">
                     <span>
-                      <Action>Get Contents of URL</Action>:
+                      <Action>Get Contents of URL</Action> (asks the NAS first, so one unreadable video cannot stop every backup):
+                    </span>
+                    {request(
+                      '/api/device/check',
+                      'POST',
+                      <span>
+                        Request Body: <Code>Form</Code>. Add field <Code>takenAt</Code> of type Text = <Code>Formatted Date</Code>.
+                      </span>,
+                    )}
+                  </li>
+                  <li>
+                    <Action>Get Dictionary Value</Action>: key <Code>skip</Code> in <Code>Contents of URL</Code>.
+                  </li>
+                  <li className="flex flex-col gap-2">
+                    <span>
+                      <Action>If</Action> <Code>Dictionary Value</Code> <Code>does not have any value</Code>. Inside the If, add <Action>Get Contents of URL</Action>:
                     </span>
                     {request(
                       '/api/device/upload',
@@ -297,8 +312,12 @@ export function ShortcutGuide(p: GuideProps) {
                         <Code>Formatted Date</Code>.
                       </span>,
                     )}
+                    <span>Leave “Otherwise” empty.</span>
                   </li>
                 </ol>
+                <Notice tone="warn">
+                  Type the header key exactly as <Code>Authorization</Code>. A space after it makes every request fail before it reaches the NAS.
+                </Notice>
               </Step>
             </Part>
           )}
@@ -395,8 +414,13 @@ export function ShortcutGuide(p: GuideProps) {
         <h3 className="mb-3 font-semibold">Run it once</h3>
         <p className="text-sm leading-relaxed text-muted">
           Tap ▶ with the phone unlocked. Allow access to {media ? 'Photos, ' : ''}
-          {b.files ? 'the folders, ' : ''}and the NAS when iOS asks. The backup appears on the NAS in “Phone Backup/{p.deviceName}”, laid out as shown at the top.
+          {b.files ? 'the folders, ' : ''}and the NAS when iOS asks, and choose <b className="text-fg">Always Allow</b> so the automation can run on its own later. The backup appears on the NAS in “Phone Backup/{p.deviceName}”, laid out as shown at the top.
         </p>
+        {media && (
+          <Notice tone="info" title="iOS says it is “trying to share 300 Photos items, which is not allowed”?">
+            Open Settings → Apps → Shortcuts → Advanced and turn on <b>Allow Sharing Large Amounts of Data</b>, then run the shortcut again.
+          </Notice>
+        )}
       </section>
 
       <section>

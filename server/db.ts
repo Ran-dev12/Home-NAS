@@ -159,6 +159,20 @@ const MIGRATIONS: string[] = [
     PRIMARY KEY (device_id, folder, name, created)
   );
   `,
+  `
+  -- Items a phone cannot read (a video whose original is only in iCloud, say). Shortcuts cannot catch
+  -- errors, so such an item would stop every run. pending_item is the item last cleared for upload; if the
+  -- next run starts without it having arrived, it gets a miss, and after two misses it is skipped.
+  ALTER TABLE devices ADD COLUMN pending_item TEXT;
+  ALTER TABLE devices ADD COLUMN run_unreadable INTEGER NOT NULL DEFAULT 0;
+  CREATE TABLE device_problems (
+    device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    item TEXT NOT NULL,
+    misses INTEGER NOT NULL DEFAULT 0,
+    skipped_at TEXT,
+    PRIMARY KEY (device_id, item)
+  );
+  `,
 ];
 
 export function openDb(file: string): Db {

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { Router, type Request, type Response, type NextFunction } from 'express';
+import express, { Router, type Request, type Response, type NextFunction } from 'express';
 import exifr from 'exifr';
 import type { Runtime } from '../runtime.ts';
 import { FailureLimiter, clientIp, randomToken, requireUser, sha256 } from '../auth.ts';
@@ -52,6 +52,8 @@ export interface DeviceRow extends DeviceSyncState {
   backup_screenshots: number;
   backup_files: number;
   run_excluded: number;
+  pending_item: string | null;
+  run_unreadable: number;
 }
 
 /** What a phone backs up. Photos, videos and screenshots come from the Photos app; files from the Files app. */
@@ -122,6 +124,9 @@ function publicDevice(d: DeviceRow) {
     backup: backupOf(d),
   };
 }
+
+/** After this many runs that stopped at the same item, it is skipped instead of blocking every backup. */
+const MAX_MISSES = 2;
 
 /** Make the folders a phone's choices will fill, so the tree is visible before the first backup. */
 function makeBackupFolders(home: string, d: { folder: string }, b: BackupChoice) {
@@ -237,7 +242,11 @@ export function deviceRoutes(rt: Runtime): Router {
         ? db.prepare('SELECT d.*, u.display_name AS owner FROM devices d JOIN users u ON u.id = d.user_id ORDER BY d.created_at').all()
         : db.prepare('SELECT d.*, NULL AS owner FROM devices d WHERE d.user_id = ? ORDER BY d.created_at').all(req.user!.id)
     ) as unknown as (DeviceRow & { owner: string | null })[];
-    res.json({ devices: rows.map((d) => ({ ...publicDevice(d), owner: d.owner })), ...baseUrlFor(rt, req) });
+    const skipped = db.prepare('SELECT item FROM device_problems WHERE device_id = ? AND skipped_at IS NOT NULL ORDER BY item LIMIT 50');
+    res.json({
+      devices: rows.map((d) => ({ ...publicDevice(d), owner: d.owner, unreadable: (skipped.all(d.id) as { item: string }[]).map((x) => x.item) })),
+      ...baseUrlFor(rt, req),
+    });
   });
 
   r.post('/api/devices', requireUser, (req, res) => {
@@ -309,7 +318,9 @@ export function deviceRoutes(rt: Runtime): Router {
     if (req.body?.resetFrom !== undefined) {
       // "Back up again from…": the next runs re-send from that date; server-side dedup skips what is already here.
       const cursor = startCursor(req.body.resetFrom);
-      db.prepare('UPDATE devices SET cursor = ?, run_base = ?, order_warning = 0 WHERE id = ?').run(cursor, cursor, d.id);
+      db.prepare('UPDATE devices SET cursor = ?, run_base = ?, order_warning = 0, pending_item = NULL WHERE id = ?').run(cursor, cursor, d.id);
+      // Items skipped as unreadable get another chance (the user may have downloaded them from iCloud).
+      db.prepare('DELETE FROM device_problems WHERE device_id = ? AND item >= ?').run(d.id, cursor ?? '');
     }
     res.json({ device: publicDevice(getDevice(d.id)!) });
   });
@@ -371,11 +382,18 @@ export function deviceRoutes(rt: Runtime): Router {
 
   r.get('/api/device/sync-state', deviceAuth, (req, res) => {
     const d = req.device!;
+    const db = rt.requireDb();
+    if (d.pending_item) {
+      // The last run was cleared to upload this item, but it never arrived: the phone failed on it.
+      db.prepare(
+        'INSERT INTO device_problems (device_id, item, misses) VALUES (?, ?, 1) ON CONFLICT (device_id, item) DO UPDATE SET misses = misses + 1',
+      ).run(d.id, d.pending_item);
+    }
     const fresh = freshRun(d);
     saveSync(d.id, fresh);
-    rt.requireDb()
-      .prepare('UPDATE devices SET run_started_at = ?, run_stored = 0, run_skipped = 0, run_excluded = 0, run_bytes = 0 WHERE id = ?')
-      .run(new Date().toISOString(), d.id);
+    db.prepare(
+      'UPDATE devices SET run_started_at = ?, run_stored = 0, run_skipped = 0, run_excluded = 0, run_unreadable = 0, run_bytes = 0, pending_item = NULL WHERE id = ?',
+    ).run(new Date().toISOString(), d.id);
     const { since, sinceIso } = sinceFor(fresh);
     rt.log(`${d.name} started a backup (from ${clientIp(req)}).`);
     res.json({
@@ -387,6 +405,37 @@ export function deviceRoutes(rt: Runtime): Router {
       folder: d.folder,
       serverTime: new Date().toISOString(),
     });
+  });
+
+  /**
+   * Asked before each upload with the item's Date Taken, the one thing a shortcut can read even from an item
+   * iOS cannot export. Answers {upload: "yes"}, or {skip} for an item that stopped two runs already; the
+   * shortcut uploads unless "skip" has a value (so it also works with a NAS that predates this endpoint).
+   */
+  r.post('/api/device/check', deviceAuth, express.urlencoded({ extended: false, limit: '64kb' }), async (req, res) => {
+    const d = getDevice(req.device!.id)!;
+    const fields = req.is('multipart/form-data')
+      ? (await receiveMultipart(req, { tmpDir: rt.paths.tmp, volumeRoot: rt.root, maxFileBytes: 0, minFreeBytes: 0, maxFiles: 0 })).fields
+      : ((req.body ?? {}) as Record<string, string>);
+    const parsed = parseTakenAt(fields.takenAt, d.tz_offset);
+    if (!parsed) return res.json({ upload: 'yes' }); // cannot track it; the upload itself decides
+    const item = parsed.date.toISOString();
+    const db = rt.requireDb();
+    const problem = db.prepare('SELECT misses, skipped_at FROM device_problems WHERE device_id = ? AND item = ?').get(d.id, item) as
+      | { misses: number; skipped_at: string | null }
+      | undefined;
+    if (problem && (problem.skipped_at || problem.misses >= MAX_MISSES)) {
+      if (!problem.skipped_at) {
+        db.prepare('UPDATE device_problems SET skipped_at = ? WHERE device_id = ? AND item = ?').run(new Date().toISOString(), d.id, item);
+        rt.log(`${d.name}: the item taken ${parsed.date.toLocaleString()} could not be read on the phone twice, so it is skipped. See Phones on the NAS.`);
+      }
+      // Handled as far as ordering goes, so the bookmark moves past it and later photos get through.
+      saveSync(d.id, afterUpload({ ...d, tz_offset: parsed.offsetMin ?? d.tz_offset }, parsed.date));
+      db.prepare('UPDATE devices SET run_unreadable = run_unreadable + 1, pending_item = NULL WHERE id = ?').run(d.id);
+      return res.json({ skip: 'This item could not be read on the phone, so it is skipped. See Phones on the NAS.' });
+    }
+    db.prepare('UPDATE devices SET pending_item = ? WHERE id = ?').run(item, d.id);
+    res.json({ upload: 'yes' });
   });
 
   r.post('/api/device/upload', deviceAuth, async (req, res) => {
@@ -453,6 +502,7 @@ export function deviceRoutes(rt: Runtime): Router {
     const latest = getDevice(dev.id)!;
     const next = afterUpload({ ...latest, tz_offset: parsed?.offsetMin ?? latest.tz_offset }, takenAt);
     saveSync(dev.id, next);
+    db.prepare('UPDATE devices SET pending_item = NULL WHERE id = ?').run(dev.id);
     if (status === 'stored') {
       db.prepare(
         'UPDATE devices SET run_stored = run_stored + 1, run_bytes = run_bytes + ?, total_files = total_files + 1, total_bytes = total_bytes + ? WHERE id = ?',
@@ -563,13 +613,20 @@ export function deviceRoutes(rt: Runtime): Router {
     const { state, outOfOrder } = completeRun(d);
     saveSync(d.id, state);
     const now = new Date().toISOString();
-    rt.requireDb().prepare('UPDATE devices SET last_sync_at = ?, order_warning = ? WHERE id = ?').run(now, outOfOrder ? 1 : 0, d.id);
+    const db = rt.requireDb();
+    db.prepare('UPDATE devices SET last_sync_at = ?, order_warning = ?, pending_item = NULL WHERE id = ?').run(now, outOfOrder ? 1 : 0, d.id);
+    // A run that got to the end proves earlier one-off failures were passing problems.
+    db.prepare('DELETE FROM device_problems WHERE device_id = ? AND skipped_at IS NULL').run(d.id);
     const name = rt.settings().serverName;
-    const notes = [d.run_skipped ? `${d.run_skipped} already there` : '', d.run_excluded ? `${d.run_excluded} turned off in this phone’s settings` : ''].filter(Boolean);
+    const notes = [
+      d.run_skipped ? `${d.run_skipped} already there` : '',
+      d.run_excluded ? `${d.run_excluded} turned off in this phone’s settings` : '',
+      d.run_unreadable ? `${d.run_unreadable} could not be read on the phone, see Phones on the NAS` : '',
+    ].filter(Boolean);
     let message =
       d.run_stored > 0
         ? `Backed up ${d.run_stored} new item${d.run_stored === 1 ? '' : 's'} to ${name}` + (notes.length ? ` (${notes.join(', ')})` : '')
-        : 'Everything is already backed up' + (d.run_excluded ? ` (${notes.at(-1)})` : '');
+        : 'Everything is already backed up' + (d.run_excluded || d.run_unreadable ? ` (${notes.filter((n) => !n.includes('already there')).join(', ')})` : '');
     if (outOfOrder) message += '. Warning: set Find Photos to sort by Date Taken, Oldest First.';
     if (d.run_stored + d.run_skipped + d.run_excluded > 0) {
       logActivity(rt, {
@@ -588,6 +645,7 @@ export function deviceRoutes(rt: Runtime): Router {
       stored: d.run_stored,
       skipped: d.run_skipped,
       excluded: d.run_excluded,
+      unreadable: d.run_unreadable,
       bytes: d.run_bytes,
       backedUpThrough: state.cursor ?? BEGINNING,
       outOfOrder,

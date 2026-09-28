@@ -237,6 +237,17 @@ function DeviceCard({
           </Badge>
         ))}
       </div>
+      {!!d.unreadable?.length && (
+        <Notice tone="warn" title={`${plural(d.unreadable.length, 'item')} could not be read on the phone, so ${d.unreadable.length === 1 ? 'it was' : 'they were'} skipped`}>
+          <span className="flex flex-col gap-1.5">
+            <span>Taken {d.unreadable.slice(0, 5).map((t) => formatDateTime(t)).join(', ') + (d.unreadable.length > 5 ? ', …' : '')}.</span>
+            <span>
+              Usually a video whose original is only in iCloud. Open it in the Photos app so it downloads (or turn on Settings → Photos → <b>Download and Keep Originals</b>), then choose <b>Back up again from…</b> with a
+              date just before it.
+            </span>
+          </span>
+        </Notice>
+      )}
       {d.orderWarning && (
         <Notice tone="warn" title="The shortcut sends photos newest first">
           Open the shortcut’s <b>Find Photos</b> step and set the order to <b>Oldest First</b>. Until then the NAS re-checks the same photos every run. Nothing is lost, but it is slower.
