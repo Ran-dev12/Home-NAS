@@ -28,18 +28,28 @@ async function sharpFrom(abs: string): Promise<Sharp> {
  * handle; Node 26 treats a garbage-collected FileHandle as a fatal error. So Node reads the file and exifr
  * only ever sees a buffer. Metadata sits near the start, so very large files are read only in part.
  */
-const EXIF_READ_MAX = 64 * 1024 * 1024;
+export const EXIF_READ_MAX = 64 * 1024 * 1024;
 
-async function readForExif(abs: string): Promise<Buffer> {
+/** The first `max` bytes of a file (all of it if smaller). The handle is always closed. */
+export async function readHead(abs: string, max: number): Promise<Buffer> {
   const fh = await fs.promises.open(abs, 'r');
   try {
     const { size } = await fh.stat();
-    const buf = Buffer.alloc(Math.min(size, EXIF_READ_MAX));
+    const buf = Buffer.alloc(Math.min(size, max));
     const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
     return buf.subarray(0, bytesRead);
   } finally {
     await fh.close();
   }
+}
+
+/**
+ * iOS marks screenshots with the comment "Screenshot": in EXIF (stored as "ASCII\0\0\0Screenshot") or in
+ * XMP. exifr does not read the XMP form in PNGs, so look for the marker in the file's metadata directly.
+ */
+export async function isScreenshot(abs: string): Promise<boolean> {
+  const head = (await readHead(abs, 256 * 1024)).toString('latin1');
+  return head.includes('ASCII\0\0\0Screenshot') || /UserComment[\s\S]{0,200}?Screenshot/.test(head);
 }
 
 const THUMB_PX = 480;
@@ -90,7 +100,7 @@ function dmsToDeg(v: unknown, ref: unknown): number | null {
 async function imageMeta(abs: string, name: string): Promise<MediaMeta> {
   const meta: MediaMeta = { ...EMPTY_META };
   try {
-    const x = await exifr.parse(await readForExif(abs), { tiff: true, ifd0: true, exif: true, gps: true, translateValues: false, mergeOutput: true } as never);
+    const x = await exifr.parse(await readHead(abs, EXIF_READ_MAX), { tiff: true, ifd0: true, exif: true, gps: true, translateValues: false, mergeOutput: true } as never);
     if (x) {
       const dt: Date | undefined = x.DateTimeOriginal ?? x.CreateDate ?? x.DateTimeDigitized;
       if (dt instanceof Date && !isNaN(dt.getTime())) meta.takenAt = wallClockToIso(dt, offsetMinutes(x.OffsetTimeOriginal ?? x.OffsetTime));

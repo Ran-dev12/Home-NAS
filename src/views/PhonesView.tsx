@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
-import { CalendarClock, Ellipsis, FolderOpen, KeyRound, ListChecks, Pencil, Plus, Smartphone, Trash2 } from 'lucide-react';
+import { CalendarClock, Ellipsis, FolderOpen, KeyRound, ListChecks, Pencil, Plus, SlidersHorizontal, Smartphone, Trash2 } from 'lucide-react';
 import { del, get, patch, post } from '../lib/api.ts';
 import { filesHref, navigate } from '../lib/router.ts';
 import { formatBytes, formatDateTime, plural, timeAgo } from '../lib/format.ts';
-import type { Device, DeviceSecret, User } from '../lib/types.ts';
+import type { BackupChoice, Device, DeviceSecret, User } from '../lib/types.ts';
 import { useDebounced, useServerEvent } from '../lib/events.ts';
 import { Badge, Button, Card, EmptyState, Field, Input, Menu, Modal, Notice, PageHeader, Select, Spinner, useDialogs, useToast } from '../components/ui.tsx';
 import { ShortcutGuide } from '../components/ShortcutGuide.tsx';
@@ -19,7 +19,8 @@ export function PhonesView({ user }: { user: User }) {
   const [serverName, setServerName] = useState('HomeNAS');
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
-  const [guide, setGuide] = useState<{ device: Device; secret?: DeviceSecret } | null>(null);
+  const [guide, setGuide] = useState<{ device: Device; secret?: DeviceSecret; choicesChanged?: boolean } | null>(null);
+  const [choosing, setChoosing] = useState<Device | null>(null);
   const toast = useToast();
   const dialogs = useDialogs();
 
@@ -96,7 +97,7 @@ export function PhonesView({ user }: { user: User }) {
     <div>
       <PageHeader
         title="Phones"
-        subtitle="iPhones back up their photos and videos here over Wi-Fi, automatically, using the built-in Shortcuts app."
+        subtitle="iPhones back up photos, videos and files here over Wi-Fi whenever they charge at home, using the built-in Shortcuts app."
         actions={
           <Button variant="primary" icon={Plus} onClick={() => setAdding(true)}>
             Add phone
@@ -126,6 +127,7 @@ export function PhonesView({ user }: { user: User }) {
                 key={d.id}
                 d={d}
                 onGuide={() => setGuide({ device: d })}
+                onChoices={() => setChoosing(d)}
                 onFolder={() => navigate(filesHref(`u:${user.id}`, d.folder))}
                 onNewToken={() => newToken(d)}
                 onRename={() => rename(d)}
@@ -147,6 +149,16 @@ export function PhonesView({ user }: { user: User }) {
         }}
       />
 
+      <BackupChoiceModal
+        device={choosing}
+        onClose={() => setChoosing(null)}
+        onSaved={(device) => {
+          setChoosing(null);
+          setGuide({ device, choicesChanged: true });
+          void load();
+        }}
+      />
+
       <Modal open={!!guide} onClose={() => setGuide(null)} title={`Set up ${guide?.device.name ?? ''}`} size="lg" footer={<Button variant="primary" onClick={() => setGuide(null)}>Done</Button>}>
         {guide && data && (
           <ShortcutGuide
@@ -157,6 +169,8 @@ export function PhonesView({ user }: { user: User }) {
             token={guide.secret?.token}
             tokenHint={guide.device.tokenHint}
             limit={guide.device.batchLimit}
+            backup={guide.device.backup}
+            choicesChanged={guide.choicesChanged}
             pairUrl={guide.secret?.pairUrl}
             pairExpiresAt={guide.secret?.pairExpiresAt}
             onNewToken={guide.secret ? undefined : () => newToken(guide.device)}
@@ -170,6 +184,7 @@ export function PhonesView({ user }: { user: User }) {
 function DeviceCard({
   d,
   onGuide,
+  onChoices,
   onFolder,
   onNewToken,
   onRename,
@@ -178,6 +193,7 @@ function DeviceCard({
 }: {
   d: Device;
   onGuide: () => void;
+  onChoices: () => void;
   onFolder: () => void;
   onNewToken: () => void;
   onRename: () => void;
@@ -205,6 +221,7 @@ function DeviceCard({
           icon={Ellipsis}
           items={[
             { label: 'Setup steps', icon: ListChecks, onClick: onGuide },
+            { label: 'What to back up…', icon: SlidersHorizontal, onClick: onChoices },
             { label: 'Open backup folder', icon: FolderOpen, onClick: onFolder },
             { label: 'New token', icon: KeyRound, onClick: onNewToken },
             { label: 'Rename', icon: Pencil, onClick: onRename },
@@ -212,6 +229,13 @@ function DeviceCard({
             { label: 'Remove phone', icon: Trash2, onClick: onRemove, danger: true },
           ]}
         />
+      </div>
+      <div className="flex flex-wrap gap-1.5" aria-label="Backs up">
+        {CHOICES.filter((c) => d.backup[c.key]).map((c) => (
+          <Badge key={c.key} tone="primary">
+            {c.label}
+          </Badge>
+        ))}
       </div>
       {d.orderWarning && (
         <Notice tone="warn" title="The shortcut sends photos newest first">
@@ -233,7 +257,9 @@ function DeviceCard({
         </div>
         <div>
           <dt className="text-muted">Last run</dt>
-          <dd className="font-medium">{d.lastRun.startedAt ? `${d.lastRun.stored} new, ${d.lastRun.skipped} skipped` : '—'}</dd>
+          <dd className="font-medium">
+            {d.lastRun.startedAt ? `${d.lastRun.stored} new, ${d.lastRun.skipped + d.lastRun.excluded} skipped` : '—'}
+          </dd>
         </div>
       </dl>
       {never && (
@@ -250,6 +276,7 @@ function AddPhoneModal({ open, onClose, onCreated }: { open: boolean; onClose: (
   const [start, setStart] = useState<'everything' | 'date' | 'now'>('everything');
   const [date, setDate] = useState('');
   const [limit, setLimit] = useState('300');
+  const [backup, setBackup] = useState<BackupChoice>(DEFAULT_CHOICE);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -257,14 +284,16 @@ function AddPhoneModal({ open, onClose, onCreated }: { open: boolean; onClose: (
       setName('');
       setStart('everything');
       setDate('');
+      setBackup(DEFAULT_CHOICE);
       setError(null);
     }
   }, [open]);
+  const media = backup.photos || backup.videos || backup.screenshots;
   const create = async () => {
     setBusy(true);
     setError(null);
     try {
-      onCreated(await post<DeviceSecret>('/api/devices', { name, startFrom: start === 'date' ? date : start, batchLimit: Number(limit) }));
+      onCreated(await post<DeviceSecret>('/api/devices', { name, startFrom: start === 'date' ? date : start, batchLimit: Number(limit), backup }));
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -279,7 +308,7 @@ function AddPhoneModal({ open, onClose, onCreated }: { open: boolean; onClose: (
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" loading={busy} disabled={!name.trim() || (start === 'date' && !date)} onClick={create}>
+          <Button variant="primary" loading={busy} disabled={!name.trim() || (media && start === 'date' && !date) || !anyChoice(backup)} onClick={create}>
             Continue
           </Button>
         </>
@@ -292,31 +321,117 @@ function AddPhoneModal({ open, onClose, onCreated }: { open: boolean; onClose: (
           void create();
         }}
       >
-        <Field label="Phone name" id="ph-name" hint="Photos go to Phone Backup/<this name> in your files.">
+        <Field label="Phone name" id="ph-name" hint="Each phone gets its own folder: Phone Backup/<this name> in your files.">
           <Input id="ph-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Ranjeet’s iPhone" autoFocus />
         </Field>
-        <Field label="What to back up" id="ph-start">
-          <Select id="ph-start" value={start} onChange={(e) => setStart(e.target.value as typeof start)}>
-            <option value="everything">Everything on the phone</option>
-            <option value="date">Photos taken after a date</option>
-            <option value="now">Only new photos from now on</option>
-          </Select>
-        </Field>
-        {start === 'date' && (
+        <BackupChoices value={backup} onChange={setBackup} />
+        {media && (
+          <Field label="Photos and videos to start from" id="ph-start">
+            <Select id="ph-start" value={start} onChange={(e) => setStart(e.target.value as typeof start)}>
+              <option value="everything">Everything already on the phone</option>
+              <option value="date">Taken after a date</option>
+              <option value="now">Only new ones from now on</option>
+            </Select>
+          </Field>
+        )}
+        {media && start === 'date' && (
           <Field label="Start date" id="ph-date">
             <Input id="ph-date" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
           </Field>
         )}
-        <Field label="Photos per run" id="ph-limit" hint="Smaller runs finish reliably. Each run continues where the last one stopped.">
-          <Select id="ph-limit" value={limit} onChange={(e) => setLimit(e.target.value)}>
-            <option value="100">100</option>
-            <option value="300">300 (recommended)</option>
-            <option value="1000">1,000</option>
-          </Select>
-        </Field>
+        {media && (
+          <Field label="Photos and videos per run" id="ph-limit" hint="Smaller runs finish reliably. Each run continues where the last one stopped.">
+            <Select id="ph-limit" value={limit} onChange={(e) => setLimit(e.target.value)}>
+              <option value="100">100</option>
+              <option value="300">300 (recommended)</option>
+              <option value="1000">1,000</option>
+            </Select>
+          </Field>
+        )}
         {error && <Notice tone="danger">{error}</Notice>}
         <button type="submit" hidden />
       </form>
+    </Modal>
+  );
+}
+
+const DEFAULT_CHOICE: BackupChoice = { photos: true, videos: true, screenshots: true, files: false };
+
+const CHOICES: { key: keyof BackupChoice; label: string; hint: string }[] = [
+  { key: 'photos', label: 'Photos', hint: 'Everything in the Photos app, sorted by year and month.' },
+  { key: 'videos', label: 'Videos', hint: 'Kept in their own folder. Videos are large, so the first backup takes a few charges.' },
+  { key: 'screenshots', label: 'Screenshots', hint: 'Kept apart from real photos.' },
+  { key: 'files', label: 'Files and folders', hint: 'Folders you pick from the Files app (iCloud Drive or On My iPhone). New and changed files are sent each time.' },
+];
+
+const anyChoice = (b: BackupChoice) => b.photos || b.videos || b.screenshots || b.files;
+
+function BackupChoices({ value, onChange }: { value: BackupChoice; onChange: (b: BackupChoice) => void }) {
+  return (
+    <fieldset className="flex flex-col gap-1.5">
+      <legend className="mb-1.5 text-sm font-medium text-fg">What to back up</legend>
+      <div className="flex flex-col gap-0.5">
+        {CHOICES.map((c) => (
+          <label key={c.key} className="-mx-2 flex cursor-pointer items-start gap-3 rounded-lg p-2 hover:bg-subtle">
+            <input
+              type="checkbox"
+              className="mt-0.5 size-4 shrink-0 cursor-pointer accent-primary"
+              checked={value[c.key]}
+              onChange={(e) => onChange({ ...value, [c.key]: e.target.checked })}
+            />
+            <span className="text-sm">
+              <span className="font-medium text-fg">{c.label}</span>
+              <span className="block text-muted">{c.hint}</span>
+            </span>
+          </label>
+        ))}
+      </div>
+      {!anyChoice(value) && <p className="text-sm text-danger">Choose at least one.</p>}
+    </fieldset>
+  );
+}
+
+function BackupChoiceModal({ device, onClose, onSaved }: { device: Device | null; onClose: () => void; onSaved: (d: Device) => void }) {
+  const [value, setValue] = useState<BackupChoice>(DEFAULT_CHOICE);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (device) {
+      setValue(device.backup);
+      setError(null);
+    }
+  }, [device]);
+  const save = async () => {
+    if (!device) return;
+    setBusy(true);
+    setError(null);
+    try {
+      onSaved((await patch<{ device: Device }>(`/api/devices/${device.id}`, { backup: value })).device);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal
+      open={!!device}
+      onClose={onClose}
+      title={`What ${device?.name ?? 'this phone'} backs up`}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="primary" loading={busy} disabled={!anyChoice(value)} onClick={save}>
+            Save
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-4">
+        <BackupChoices value={value} onChange={setValue} />
+        <Notice tone="info">After saving, the setup steps show what to change in the shortcut on the phone. Until then, the NAS skips anything you turned off.</Notice>
+        {error && <Notice tone="danger">{error}</Notice>}
+      </div>
     </Modal>
   );
 }

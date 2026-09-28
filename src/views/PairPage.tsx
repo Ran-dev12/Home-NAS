@@ -3,11 +3,13 @@ import { Server } from 'lucide-react';
 import { get } from '../lib/api.ts';
 import { Notice, Spinner } from '../components/ui.tsx';
 import { ShortcutGuide } from '../components/ShortcutGuide.tsx';
+import type { BackupChoice } from '../lib/types.ts';
 
 interface Pairing {
   deviceName: string;
   token: string;
   batchLimit: number;
+  backup: BackupChoice;
   serverName: string;
   baseUrl: string;
   expiresAt: string;
@@ -47,7 +49,7 @@ export function PairPage({ code }: { code: string }) {
         <>
           <Notice tone="info">Keep this page open in Safari and switch between it and Shortcuts, copying each value as you go.</Notice>
           <div className="mt-5">
-            <ShortcutGuide serverName={p.serverName} deviceName={p.deviceName} baseUrl={p.baseUrl} token={p.token} limit={p.batchLimit} />
+            <ShortcutGuide serverName={p.serverName} deviceName={p.deviceName} baseUrl={p.baseUrl} token={p.token} limit={p.batchLimit} backup={p.backup} />
           </div>
         </>
       )}

@@ -78,10 +78,19 @@ export interface Device {
   lastSyncAt: string | null;
   backedUpThrough: string | null;
   batchLimit: number;
-  lastRun: { stored: number; skipped: number; bytes: number; startedAt: string | null };
+  lastRun: { stored: number; skipped: number; excluded: number; bytes: number; startedAt: string | null };
   totalFiles: number;
   totalBytes: number;
   orderWarning: boolean;
+  backup: BackupChoice;
+}
+
+/** What a phone backs up. Photos, videos and screenshots come from the Photos app; files from the Files app. */
+export interface BackupChoice {
+  photos: boolean;
+  videos: boolean;
+  screenshots: boolean;
+  files: boolean;
 }
 
 export interface DeviceSecret {

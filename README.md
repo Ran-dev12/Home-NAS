@@ -4,7 +4,7 @@ A home NAS that runs on an ordinary Windows PC with an external SSD. The family 
 
 - **Files**: a private folder for each person, plus shared folders with view-only or edit access. Upload (including whole folders) by dragging into the browser, download, zip, move, rename, search, preview.
 - **Photos**: one timeline of every photo and video you can access, sorted by when it was taken, with thumbnails (including iPhone HEIC), EXIF details and location.
-- **Phone backup**: iPhones back up over Wi-Fi by themselves when they charge at home, using the built-in Shortcuts app. Nothing to install from the App Store.
+- **Phone backup**: iPhones back up photos, videos, screenshots and chosen Files-app folders over Wi-Fi by themselves when they charge at home (cable, MagSafe or wireless), using the built-in Shortcuts app. Nothing to install from the App Store.
 - **Share links**: view or download links for people without an account, with an optional password and expiry.
 - **Trash**: nothing is deleted straight away. Items stay recoverable for 30 days (configurable).
 
@@ -30,19 +30,26 @@ Optional: install **ffmpeg** (`winget install Gyan.FFmpeg`) for video thumbnails
 
 ## Phone backup (iPhone)
 
-Phones → **Add phone** gives a QR code. Scan it with the iPhone camera and the setup steps open on the phone, with copy buttons for everything. You build the shortcut once (about five minutes) and add an automation, *When charger connects → Run Immediately*. From then on it is **automatic**: every time the phone charges at home it backs up and shows “Backed up 12 new items”. An optional second automation at, say, 3:00 AM catches phones that sit on the charger all evening.
+Phones → **Add phone** asks what this phone should back up (photos, videos, screenshots, files and folders; change it later under the phone’s menu → *What to back up…*), then gives a QR code. Scan it with the iPhone camera and the setup steps open on the phone, with copy buttons for everything. You build the shortcut once (about five minutes) and add an automation, *When charger connects → Run Immediately*. From then on it is **automatic**: every time the phone charges at home it backs up and shows “Backed up 12 new items”. An optional second automation at, say, 3:00 AM catches phones that sit on the charger all evening.
 
 **Adding more phones.** Each phone gets its own key and its own folder. The person it belongs to signs in (Admin → Users adds people) and chooses Phones → Add phone. You do not rebuild the shortcut: the NAS address and the key each live in a single Text action at the top of it, so you share the finished shortcut from the first iPhone by iCloud link (with the key temporarily replaced by a placeholder), and on the new phone paste its own key into that one line. The setup page walks through this.
 
-Each phone’s backups land in their own tree:
+Each phone’s backups land in their own tree, sorted by kind:
 
 ```
 users\ranjeet\Phone Backup\
-    Ranjeet's iPhone 15 Pro\2026\09\IMG_3001.HEIC
-    Mum's iPhone\2026\08\IMG_0412.HEIC
+    Ranjeet's iPhone 15 Pro\
+        Photos\2026\09\IMG_3001.HEIC
+        Videos\2026\09\IMG_3002.MOV
+        Screenshots\2026\09\IMG_3003.PNG
+        Files\Documents\Taxes\receipt.pdf
+    Mum's iPhone\
+        Photos\2026\08\IMG_0412.HEIC
 users\priya\Phone Backup\
-    Priya's iPhone\2026\09\...
+    Priya's iPhone\...
 ```
+
+The setup steps follow the phone’s choices (for example a Find Photos filter that leaves out screenshots). If the shortcut sends something that is turned off, the NAS skips it.
 
 How the sync works, and why:
 
@@ -50,9 +57,10 @@ How the sync works, and why:
 - An interrupted run (screen locked, Wi-Fi dropped) resumes where it stopped. Duplicates are detected by content hash and skipped.
 - If a shortcut sends photos newest-first, the NAS refuses to move its bookmark, so nothing is ever skipped, and the Phones page tells you to fix the sort order.
 - A photo with a wrong clock (dated in the future) is stored, but never moves the bookmark.
-- Photos land in `My files/Phone Backup/<phone>/<year>/<month>/` with the file date set to when they were taken.
+- Photos land in `My files/Phone Backup/<phone>/Photos/<year>/<month>/` (videos under `Videos`, screenshots under `Screenshots`) with the file date set to when they were taken. Screenshots are recognised by the “Screenshot” comment iOS writes into them.
+- **Files and folders**: for each folder picked in the shortcut, and each file in it, the shortcut first asks the NAS whether it needs the file (by name, creation date, modification date and size). Only new or changed files are uploaded, to `Files/<folder name>/`. A changed file replaces its copy and the old version goes to the trash. Files deleted on the phone stay on the NAS. Shortcuts cannot report a file’s subfolder path, so files from subfolders of a picked folder sit together in that folder; pick subfolders separately to keep them apart.
 
-Things Shortcuts cannot do: the motion part of **Live Photos** is not backed up (the still is), and photos added to the phone with an *old* date (for example AirDropped) are older than the bookmark. Use the phone’s menu → *Back up again from…* to sweep a date range again; anything already on the NAS is skipped.
+Things Shortcuts cannot do: data inside other apps (chats, app settings, Health) is out of reach, so keep iCloud Backup on or use the Apple Devices app for full backups; the motion part of **Live Photos** is not backed up (the still is); and photos added to the phone with an *old* date (for example AirDropped) are older than the bookmark. Use the phone’s menu → *Back up again from…* to sweep a date range again; anything already on the NAS is skipped.
 
 A large existing library catches up over several charges. For a faster first run, copy the old photos over USB into the phone’s backup folder; later syncs recognise them.
 
@@ -145,7 +153,7 @@ Everything is on one SSD. If that drive fails, is stolen or is dropped, everythi
 ```
 npm install
 npm run dev          # http://localhost:4300 with live reload (uses data/config.json)
-npm test             # 42 tests: paths, sync rules, API, media, background workers, Linux drives
+npm test             # 44 tests: paths, sync rules, API, phone and files backup, media, background workers, Linux drives
 npm run typecheck
 npm run build        # web interface into dist/
 npm start            # production server

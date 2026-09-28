@@ -230,7 +230,7 @@ test('share links: public access, confinement, password, expiry, revoke', async 
   assert.equal((await anon.get(`/api/public/share/${l2.url.split('/s/')[1]}/file?path=/a.txt`)).text, 'AAA');
 });
 
-test('phone backup: sync-state, upload, dedup, month folders, cursor, bad token', async () => {
+test('phone backup: sync-state, upload, dedup, Photos/year/month folders, cursor, bad token', async () => {
   const { srv, admin } = await fresh('phone');
   const created = await admin.post('/api/devices', { name: "Ranjeet's iPhone", startFrom: 'everything' });
   assert.equal(created.status, 200, created.text);
@@ -259,16 +259,16 @@ test('phone backup: sync-state, upload, dedup, month folders, cursor, bad token'
   };
   const a = await send('IMG_0001.HEIC', 'photo-one', '2026-08-31T23:50:00+05:30');
   assert.equal(a.json.status, 'stored', a.text);
-  assert.equal(a.json.path, "/Phone Backup/Ranjeet's iPhone/2026/08/IMG_0001.HEIC");
+  assert.equal(a.json.path, "/Phone Backup/Ranjeet's iPhone/Photos/2026/08/IMG_0001.HEIC");
   const b = await send('IMG_0002.HEIC', 'photo-two', '2026-09-01T00:30:00+05:30');
-  assert.equal(b.json.path, "/Phone Backup/Ranjeet's iPhone/2026/09/IMG_0002.HEIC", 'month follows the phone clock');
+  assert.equal(b.json.path, "/Phone Backup/Ranjeet's iPhone/Photos/2026/09/IMG_0002.HEIC", 'month follows the phone clock');
   const again = await send('IMG_0001.HEIC', 'photo-one', '2026-08-31T23:50:00+05:30');
   assert.equal(again.json.status, 'duplicate');
   // iPhones reuse IMG_ numbers after 9999: same name, different photo, same month.
   const c = await send('IMG_0002.HEIC', 'different-photo', '2026-09-02T09:00:00+05:30');
-  assert.equal(c.json.path, "/Phone Backup/Ranjeet's iPhone/2026/09/IMG_0002 (1).HEIC");
+  assert.equal(c.json.path, "/Phone Backup/Ranjeet's iPhone/Photos/2026/09/IMG_0002 (1).HEIC");
 
-  const disk = path.join(srv.volume, 'users', 'ranjeet', 'Phone Backup', "Ranjeet's iPhone", '2026', '08', 'IMG_0001.HEIC');
+  const disk = path.join(srv.volume, 'users', 'ranjeet', 'Phone Backup', "Ranjeet's iPhone", 'Photos', '2026', '08', 'IMG_0001.HEIC');
   assert.equal(fs.readFileSync(disk, 'utf8'), 'photo-one');
   assert.equal(fs.statSync(disk).mtime.toISOString(), '2026-08-31T18:20:00.000Z', 'file date = when the photo was taken');
 
@@ -301,6 +301,109 @@ test('phone backup: sync-state, upload, dedup, month folders, cursor, bad token'
   assert.equal((await phone.get(pairPath)).status, 404);
   const newPair = await phone.get(new URL(rotated.json.pairUrl).pathname.replace('/pair/', '/api/pair/'));
   assert.equal(newPair.json.token, rotated.json.token);
+});
+
+test('phone backup choices: videos and screenshots get their own folders; turned-off kinds are skipped', async () => {
+  const { srv, admin } = await fresh('phone-kinds');
+  const created = await admin.post('/api/devices', { name: 'Test iPhone', startFrom: 'everything', backup: { photos: true, videos: true, screenshots: true, files: false } });
+  assert.equal(created.status, 200, created.text);
+  assert.deepEqual(created.json.device.backup, { photos: true, videos: true, screenshots: true, files: false });
+  const root = path.join(srv.volume, 'users', 'ranjeet', 'Phone Backup', 'Test iPhone');
+  assert.deepEqual(fs.readdirSync(root).sort(), ['Photos', 'Screenshots', 'Videos'], 'the tree exists before the first backup');
+
+  const phone = new Client(srv.base);
+  phone.csrf = false;
+  const auth = { authorization: `Bearer ${created.json.token}` };
+  await phone.req('GET', '/api/device/sync-state', undefined, auth);
+  const send = (name: string, type: string, data: string, takenAt: string) => {
+    const fd = new FormData();
+    fd.append('file', new Blob([data], { type }), name);
+    fd.append('takenAt', takenAt);
+    return phone.req('POST', '/api/device/upload', fd, auth);
+  };
+  const photo = await send('IMG_0001.HEIC', 'image/heic', 'photo', '2026-09-01T10:00:00+05:30');
+  assert.equal(photo.json.path, '/Phone Backup/Test iPhone/Photos/2026/09/IMG_0001.HEIC');
+  const video = await send('IMG_0002.MOV', 'video/quicktime', 'video', '2026-09-01T11:00:00+05:30');
+  assert.equal(video.json.path, '/Phone Backup/Test iPhone/Videos/2026/09/IMG_0002.MOV');
+  // iOS writes the EXIF comment "Screenshot" (as ASCII-prefixed bytes) into every screenshot.
+  const shot = await send('IMG_0003.PNG', 'image/png', 'PNG....ASCII\0\0\0Screenshot....', '2026-09-01T12:00:00+05:30');
+  assert.equal(shot.json.path, '/Phone Backup/Test iPhone/Screenshots/2026/09/IMG_0003.PNG');
+
+  // Turning videos off: the next video is not stored, but still counts as handled.
+  const off = await admin.patch(`/api/devices/${created.json.device.id}`, { backup: { videos: false } });
+  assert.deepEqual(off.json.device.backup, { photos: true, videos: false, screenshots: true, files: false });
+  const skipped = await send('IMG_0004.MOV', 'video/quicktime', 'video-2', '2026-09-01T13:00:00+05:30');
+  assert.equal(skipped.json.status, 'excluded');
+  assert.ok(!fs.existsSync(path.join(root, 'Videos', '2026', '09', 'IMG_0004.MOV')));
+  const done = await phone.req('POST', '/api/device/sync-complete', undefined, auth);
+  assert.equal(done.json.stored, 3);
+  assert.equal(done.json.excluded, 1);
+  assert.match(done.json.message, /1 turned off/);
+
+  const nothing = await admin.patch(`/api/devices/${created.json.device.id}`, { backup: { photos: false, screenshots: false } });
+  assert.equal(nothing.status, 400, 'at least one thing must stay on');
+});
+
+test('files backup: only new or changed files are uploaded, into Files/<folder>', async () => {
+  const { srv, admin } = await fresh('phone-files');
+  const created = await admin.post('/api/devices', { name: 'Test iPad', backup: { photos: false, videos: false, screenshots: false, files: true } });
+  assert.equal(created.status, 200, created.text);
+  const phone = new Client(srv.base);
+  phone.csrf = false;
+  const auth = { authorization: `Bearer ${created.json.token}` };
+  await phone.req('GET', '/api/device/sync-state', undefined, auth);
+
+  // What the shortcut sends: File Size arrives as display text, dates in the phone's own time zone.
+  const facts = { folder: 'Documents/Taxes', name: 'receipt', created: '2026-01-05T10:00:00+05:30', modified: '2026-01-05T10:00:00+05:30', size: '12 KB' };
+  const check = (f: object) => phone.req('POST', '/api/device/file-check', f, auth);
+  const upload = (url: string, name: string, data: string) => {
+    const fd = new FormData();
+    fd.append('file', new Blob([data]), name);
+    const u = new URL(url);
+    return phone.req('POST', u.pathname + u.search, fd, auth);
+  };
+
+  const first = await check(facts);
+  assert.equal(first.json.status, 'new');
+  assert.match(first.json.upload, /\/api\/device\/file-upload\?ticket=/);
+  const stored = await upload(first.json.upload, 'receipt.pdf', 'version 1');
+  assert.equal(stored.json.status, 'stored', stored.text);
+  assert.equal(stored.json.path, '/Phone Backup/Test iPad/Files/Documents/Taxes/receipt.pdf');
+  const disk = path.join(srv.volume, 'users', 'ranjeet', 'Phone Backup', 'Test iPad', 'Files', 'Documents', 'Taxes', 'receipt.pdf');
+  assert.equal(fs.statSync(disk).mtime.toISOString(), '2026-01-05T04:30:00.000Z', 'file date = last modified on the phone');
+  assert.equal((await upload(first.json.upload, 'receipt.pdf', 'again')).status, 400, 'a ticket works once');
+
+  const same = await check(facts);
+  assert.equal(same.json.status, 'unchanged');
+  assert.equal(same.json.upload, undefined, 'nothing to upload, so the shortcut’s If skips it');
+  const travelled = await check({ ...facts, created: '2026-01-05T04:30:00Z', modified: '2026-01-05T04:30:00Z' });
+  assert.equal(travelled.json.status, 'unchanged', 'the same moment written in another time zone is the same file');
+
+  const edited = await check({ ...facts, modified: '2026-02-01T09:00:00+05:30', size: '13 KB' });
+  assert.equal(edited.json.status, 'changed');
+  const updated = await upload(edited.json.upload, 'receipt.pdf', 'version 2');
+  assert.equal(updated.json.status, 'updated');
+  assert.equal(updated.json.path, stored.json.path);
+  assert.equal(fs.readFileSync(disk, 'utf8'), 'version 2');
+  const trashed = srv.rt.requireDb().prepare('SELECT name FROM trash').all() as { name: string }[];
+  assert.deepEqual(trashed.map((t) => t.name), ['receipt.pdf'], 'the previous version is recoverable from the trash');
+
+  // Same name, different file (it lived in another subfolder on the phone): kept side by side.
+  const other = await check({ ...facts, created: '2025-03-03T08:00:00+05:30' });
+  assert.equal(other.json.status, 'new');
+  assert.equal((await upload(other.json.upload, 'receipt.pdf', 'other')).json.path, '/Phone Backup/Test iPad/Files/Documents/Taxes/receipt (1).pdf');
+
+  // Deleted on the NAS: the next check asks for it again.
+  fs.rmSync(disk);
+  assert.equal((await check({ ...facts, modified: '2026-02-01T09:00:00+05:30', size: '13 KB' })).json.status, 'new');
+
+  const done = await phone.req('POST', '/api/device/sync-complete', undefined, auth);
+  assert.equal(done.json.stored, 3);
+  assert.equal((await admin.get('/api/devices')).json.devices[0].totalFiles, 2);
+
+  await admin.patch(`/api/devices/${created.json.device.id}`, { backup: { photos: true, files: false } });
+  assert.equal((await check(facts)).json.status, 'off');
+  assert.equal((await phone.req('POST', '/api/device/file-upload?ticket=nope', new FormData(), auth)).status, 400);
 });
 
 test('unplugging the drive takes the NAS offline; plugging it back brings it online', async () => {

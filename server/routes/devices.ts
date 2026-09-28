@@ -11,6 +11,9 @@ import { statEntry } from '../indexer.ts';
 import { commitFile, discard, receiveMultipart } from '../upload.ts';
 import { lanAddresses } from '../net.ts';
 import { logActivity } from '../activity.ts';
+import { kindOf } from '../kinds.ts';
+import { EXIF_READ_MAX, isScreenshot, readHead } from '../media.ts';
+import { moveToTrash } from '../trash.ts';
 import {
   BEGINNING,
   afterUpload,
@@ -44,6 +47,38 @@ export interface DeviceRow extends DeviceSyncState {
   total_bytes: number;
   order_warning: number;
   revoked: number;
+  backup_photos: number;
+  backup_videos: number;
+  backup_screenshots: number;
+  backup_files: number;
+  run_excluded: number;
+}
+
+/** What a phone backs up. Photos, videos and screenshots come from the Photos app; files from the Files app. */
+export interface BackupChoice {
+  photos: boolean;
+  videos: boolean;
+  screenshots: boolean;
+  files: boolean;
+}
+
+type MediaKind = 'photos' | 'videos' | 'screenshots';
+
+/** Top-level folders inside each phone's backup folder. */
+const SUBFOLDER = { photos: 'Photos', videos: 'Videos', screenshots: 'Screenshots', files: 'Files' } as const;
+
+function backupOf(d: DeviceRow): BackupChoice {
+  return { photos: !!d.backup_photos, videos: !!d.backup_videos, screenshots: !!d.backup_screenshots, files: !!d.backup_files };
+}
+
+function parseBackup(v: unknown, current: BackupChoice): BackupChoice {
+  if (v === undefined || v === null) return current;
+  if (typeof v !== 'object') throw badRequest('backup must be an object');
+  const o = v as Record<string, unknown>;
+  const pick = (k: keyof BackupChoice) => (o[k] === undefined ? current[k] : o[k] === true);
+  const out = { photos: pick('photos'), videos: pick('videos'), screenshots: pick('screenshots'), files: pick('files') };
+  if (!out.photos && !out.videos && !out.screenshots && !out.files) throw badRequest('Choose at least one thing to back up');
+  return out;
 }
 
 const EXT_FOR_MIME: Record<string, string> = {
@@ -80,11 +115,63 @@ function publicDevice(d: DeviceRow) {
     lastSyncAt: d.last_sync_at,
     backedUpThrough: d.cursor,
     batchLimit: d.batch_limit,
-    lastRun: { stored: d.run_stored, skipped: d.run_skipped, bytes: d.run_bytes, startedAt: d.run_started_at },
+    lastRun: { stored: d.run_stored, skipped: d.run_skipped, excluded: d.run_excluded, bytes: d.run_bytes, startedAt: d.run_started_at },
     totalFiles: d.total_files,
     totalBytes: d.total_bytes,
     orderWarning: !!d.order_warning,
+    backup: backupOf(d),
   };
+}
+
+/** Make the folders a phone's choices will fill, so the tree is visible before the first backup. */
+function makeBackupFolders(home: string, d: { folder: string }, b: BackupChoice) {
+  for (const k of ['photos', 'videos', 'screenshots', 'files'] as const) {
+    if (b[k]) fs.mkdirSync(toAbs(home, joinRel(d.folder, SUBFOLDER[k])), { recursive: true });
+  }
+}
+
+/** A value from a Shortcut, which may arrive as text or a number (File Size). */
+function shortcutText(v: unknown, name: string, max = 300): string {
+  const s = typeof v === 'number' ? String(v) : typeof v === 'string' ? v.trim() : '';
+  if (s.length > max) throw badRequest(`${name} is too long`);
+  return s;
+}
+
+/** Dates as UTC when they parse, so a phone that changes time zone still matches its earlier runs. */
+function normalizeWhen(raw: string): string {
+  return parseTakenAt(raw, null)?.date.toISOString() ?? raw;
+}
+
+/** "Documents" or "Work/Scans" typed in the shortcut, made safe as a folder path under Files/. */
+function filesFolder(raw: unknown): string {
+  const segs = shortcutText(raw, 'folder')
+    .split(/[/\\]+/)
+    .map((s) => sanitizeName(s.trim(), ''))
+    .filter(Boolean)
+    .slice(0, 5);
+  return segs.length ? segs.join('/') : 'From iPhone';
+}
+
+interface FileFacts {
+  folder: string;
+  name: string;
+  created: string;
+  modified: string;
+  signature: string;
+}
+
+function fileFacts(body: Record<string, unknown> | undefined): FileFacts {
+  const name = shortcutText(body?.name, 'name');
+  if (!name) throw badRequest('name is required (the file’s Name)');
+  const created = normalizeWhen(shortcutText(body?.created, 'created'));
+  const modified = normalizeWhen(shortcutText(body?.modified, 'modified'));
+  const size = shortcutText(body?.size, 'size', 60);
+  return { folder: filesFolder(body?.folder), name, created, modified, signature: `${modified}|${size}` };
+}
+
+interface DeviceFileRow {
+  signature: string;
+  path: string;
 }
 
 function startCursor(v: unknown): string | null {
@@ -99,7 +186,7 @@ function startCursor(v: unknown): string | null {
 
 async function exifDate(abs: string): Promise<Date | null> {
   try {
-    const x = await exifr.parse(abs, { pick: ['DateTimeOriginal', 'CreateDate'] } as never);
+    const x = await exifr.parse(await readHead(abs, EXIF_READ_MAX), { pick: ['DateTimeOriginal', 'CreateDate'] } as never);
     const d = x?.DateTimeOriginal ?? x?.CreateDate;
     return d instanceof Date && !isNaN(d.getTime()) ? d : null;
   } catch {
@@ -159,6 +246,7 @@ export function deviceRoutes(rt: Runtime): Router {
     if (!name) throw badRequest('Give the phone a name');
     const cursor = startCursor(req.body?.startFrom);
     const limit = Math.min(Math.max(Number(req.body?.batchLimit) || 300, 10), 2000);
+    const backup = parseBackup(req.body?.backup, { photos: true, videos: true, screenshots: true, files: false });
     const home = homeRoot(rt, req.user!.username);
     const backupRoot = toAbs(home, '/Phone Backup');
     fs.mkdirSync(backupRoot, { recursive: true });
@@ -170,11 +258,26 @@ export function deviceRoutes(rt: Runtime): Router {
     const token = `hn_${randomToken(24)}`;
     const info = db
       .prepare(
-        `INSERT INTO devices (user_id, name, folder, token_hash, token_hint, created_at, cursor, batch_limit)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO devices (user_id, name, folder, token_hash, token_hint, created_at, cursor, batch_limit,
+           backup_photos, backup_videos, backup_screenshots, backup_files)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(req.user!.id, name, folder, sha256(token), token.slice(-4), new Date().toISOString(), cursor, limit);
+      .run(
+        req.user!.id,
+        name,
+        folder,
+        sha256(token),
+        token.slice(-4),
+        new Date().toISOString(),
+        cursor,
+        limit,
+        +backup.photos,
+        +backup.videos,
+        +backup.screenshots,
+        +backup.files,
+      );
     fs.mkdirSync(toAbs(home, folder), { recursive: true });
+    makeBackupFolders(home, { folder }, backup);
     logActivity(rt, { userId: req.user!.id, action: 'device_added', space: `u:${req.user!.id}`, path: folder, detail: name });
     const id = Number(info.lastInsertRowid);
     res.json({ device: publicDevice(getDevice(id)!), token, ...baseUrlFor(rt, req), ...newPairing(req, token, id) });
@@ -190,6 +293,18 @@ export function deviceRoutes(rt: Runtime): Router {
     }
     if (req.body?.batchLimit !== undefined) {
       db.prepare('UPDATE devices SET batch_limit = ? WHERE id = ?').run(Math.min(Math.max(Number(req.body.batchLimit) || 300, 10), 2000), d.id);
+    }
+    if (req.body?.backup !== undefined) {
+      const b = parseBackup(req.body.backup, backupOf(d));
+      db.prepare('UPDATE devices SET backup_photos = ?, backup_videos = ?, backup_screenshots = ?, backup_files = ? WHERE id = ?').run(
+        +b.photos,
+        +b.videos,
+        +b.screenshots,
+        +b.files,
+        d.id,
+      );
+      const owner = db.prepare('SELECT username FROM users WHERE id = ?').get(d.user_id) as { username: string };
+      makeBackupFolders(homeRoot(rt, owner.username), d, b);
     }
     if (req.body?.resetFrom !== undefined) {
       // "Back up again from…": the next runs re-send from that date; server-side dedup skips what is already here.
@@ -216,6 +331,7 @@ export function deviceRoutes(rt: Runtime): Router {
       deviceName: d.name,
       token: p.token,
       batchLimit: d.batch_limit,
+      backup: backupOf(d),
       serverName: rt.settings().serverName,
       baseUrl: baseUrlFor(rt, req).baseUrl,
       expiresAt: new Date(p.expires).toISOString(),
@@ -256,7 +372,7 @@ export function deviceRoutes(rt: Runtime): Router {
     const fresh = freshRun(d);
     saveSync(d.id, fresh);
     rt.requireDb()
-      .prepare('UPDATE devices SET run_started_at = ?, run_stored = 0, run_skipped = 0, run_bytes = 0 WHERE id = ?')
+      .prepare('UPDATE devices SET run_started_at = ?, run_stored = 0, run_skipped = 0, run_excluded = 0, run_bytes = 0 WHERE id = ?')
       .run(new Date().toISOString(), d.id);
     const { since, sinceIso } = sinceFor(fresh);
     res.json({
@@ -291,13 +407,20 @@ export function deviceRoutes(rt: Runtime): Router {
     const parsed = parseTakenAt(rec.fields.takenAt ?? rec.fields.date ?? rec.fields.creationDate, current.tz_offset);
     const offset = parsed?.offsetMin ?? current.tz_offset ?? serverOffsetMin();
     const takenAt = parsed?.date ?? (await exifDate(file.tmpPath)) ?? new Date();
+    const media: MediaKind =
+      file.mime.startsWith('video/') || kindOf(file.filename, false) === 'video' ? 'videos' : (await isScreenshot(file.tmpPath)) ? 'screenshots' : 'photos';
 
     const dupKey = `${space}:${file.sha256}`;
     const db = rt.requireDb();
     const dup = db.prepare('SELECT path FROM files WHERE space = ? AND sha256 = ? LIMIT 1').get(space, file.sha256) as { path: string } | undefined;
-    let status: 'stored' | 'duplicate';
+    let status: 'stored' | 'duplicate' | 'excluded';
     let rel: string;
-    if (committing.has(dupKey) || (dup && fs.existsSync(toAbs(home, dup.path)))) {
+    if (!backupOf(current)[media]) {
+      // Turned off for this phone. Still counts as handled, so the bookmark moves past it.
+      discard([file]);
+      status = 'excluded';
+      rel = '';
+    } else if (committing.has(dupKey) || (dup && fs.existsSync(toAbs(home, dup.path)))) {
       discard([file]);
       status = 'duplicate';
       rel = dup?.path ?? '';
@@ -305,7 +428,7 @@ export function deviceRoutes(rt: Runtime): Router {
       committing.add(dupKey);
       try {
         const { year, month } = monthFolder(takenAt, offset);
-        const dirRel = normalizeRel(`${current.folder}/${year}/${month}`);
+        const dirRel = normalizeRel(`${current.folder}/${SUBFOLDER[media]}/${year}/${month}`);
         const dirAbs = toAbs(home, dirRel);
         fs.mkdirSync(dirAbs, { recursive: true });
         let name = sanitizeName(file.filename !== 'upload' ? file.filename : rec.fields.filename || 'IMG', 'IMG');
@@ -331,11 +454,105 @@ export function deviceRoutes(rt: Runtime): Router {
       db.prepare(
         'UPDATE devices SET run_stored = run_stored + 1, run_bytes = run_bytes + ?, total_files = total_files + 1, total_bytes = total_bytes + ? WHERE id = ?',
       ).run(file.size, file.size, dev.id);
+    } else if (status === 'excluded') {
+      db.prepare('UPDATE devices SET run_excluded = run_excluded + 1 WHERE id = ?').run(dev.id);
     } else {
       db.prepare('UPDATE devices SET run_skipped = run_skipped + 1 WHERE id = ?').run(dev.id);
     }
     rt.events.emit('device', { deviceId: dev.id, status, path: rel, name: path.basename(rel) }, { userIds: [dev.user_id] });
-    res.json({ ok: true, status, path: rel, message: status === 'stored' ? 'Saved' : 'Already backed up' });
+    const message = status === 'stored' ? 'Saved' : status === 'duplicate' ? 'Already backed up' : `Not backed up: ${SUBFOLDER[media].toLowerCase()} are turned off for this phone`;
+    res.json({ ok: true, status, path: rel, message });
+  });
+
+  // ---- Files and folders from the iPhone's Files app -------------------------------------------------
+  // For each file the shortcut first asks "do you need this?" with its name and dates (cheap), and uploads
+  // only when the answer carries an upload URL. The URL holds a one-time ticket with what the check learned.
+
+  const tickets = new Map<string, FileFacts & { deviceId: number; expires: number }>();
+  const TICKET_MS = 6 * 3600_000;
+
+  const findDeviceFile = (deviceId: number, f: FileFacts) =>
+    rt
+      .requireDb()
+      .prepare('SELECT signature, path FROM device_files WHERE device_id = ? AND folder = ? AND name = ? AND created = ?')
+      .get(deviceId, f.folder, f.name, f.created) as DeviceFileRow | undefined;
+
+  r.post('/api/device/file-check', deviceAuth, (req, res) => {
+    const d = req.device!;
+    if (!d.backup_files) return res.json({ status: 'off', message: 'Files backup is turned off for this phone' });
+    const f = fileFacts(req.body);
+    const owner = rt.requireDb().prepare('SELECT username FROM users WHERE id = ?').get(d.user_id) as { username: string };
+    const row = findDeviceFile(d.id, f);
+    const present = !!row && fs.existsSync(toAbs(homeRoot(rt, owner.username), row.path));
+    if (present && row.signature === f.signature) return res.json({ status: 'unchanged' });
+
+    const now = Date.now();
+    if (tickets.size > 20_000) for (const [k, t] of tickets) if (t.expires < now) tickets.delete(k);
+    const ticket = randomToken(18);
+    tickets.set(ticket, { ...f, deviceId: d.id, expires: now + TICKET_MS });
+    // The phone reached us through this host, so the upload URL uses it too.
+    const upload = `${req.protocol}://${req.get('host')}/api/device/file-upload?ticket=${ticket}`;
+    res.json({ status: present ? 'changed' : 'new', upload });
+  });
+
+  r.post('/api/device/file-upload', deviceAuth, async (req, res) => {
+    const dev = req.device!;
+    const key = String(req.query.ticket ?? '');
+    const t = tickets.get(key);
+    if (!t || t.deviceId !== dev.id || t.expires < Date.now()) {
+      throw badRequest('This upload was not expected (or the NAS restarted). The next backup sends the file again.');
+    }
+    const owner = rt.requireDb().prepare('SELECT id, username FROM users WHERE id = ?').get(dev.user_id) as { id: number; username: string };
+    const home = homeRoot(rt, owner.username);
+    const space = `u:${owner.id}`;
+    const s = rt.settings();
+    const rec = await receiveMultipart(req, {
+      tmpDir: rt.paths.tmp,
+      volumeRoot: rt.root,
+      maxFileBytes: s.maxUploadGb * GB,
+      minFreeBytes: s.minFreeGb * GB,
+      maxFiles: 1,
+    });
+    const file = rec.files[0];
+    if (!file) throw badRequest('No file in the upload. The form field must be a File named "file".');
+    tickets.delete(key);
+
+    const db = rt.requireDb();
+    const row = findDeviceFile(dev.id, t);
+    let rel: string;
+    let replaced = false;
+    try {
+      if (row && fs.existsSync(toAbs(home, row.path))) {
+        // A newer version of a file we already have: the old one goes to the trash, recoverable for a while.
+        moveToTrash(rt, space, home, row.path, owner.id);
+        rel = row.path;
+        replaced = true;
+      } else {
+        const dirRel = normalizeRel(`${dev.folder}/${SUBFOLDER.files}/${t.folder}`);
+        const dirAbs = toAbs(home, dirRel);
+        fs.mkdirSync(dirAbs, { recursive: true });
+        const name = uniqueName(dirAbs, sanitizeName(file.filename !== 'upload' ? file.filename : t.name, 'file'));
+        rel = joinRel(dirRel, name);
+      }
+      const abs = toAbs(home, rel);
+      const modified = parseTakenAt(t.modified, null)?.date;
+      await commitFile(file, abs, modified); // file date on the NAS = last modified on the phone
+      rt.indexer.upsert(space, rel, statEntry(abs, path.basename(abs))!, { sha256: file.sha256 });
+    } catch (err) {
+      discard([file]);
+      throw err;
+    }
+
+    db.prepare(
+      `INSERT INTO device_files (device_id, folder, name, created, signature, path, backed_up_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (device_id, folder, name, created) DO UPDATE SET signature = excluded.signature, path = excluded.path, backed_up_at = excluded.backed_up_at`,
+    ).run(dev.id, t.folder, t.name, t.created, t.signature, rel, new Date().toISOString());
+    db.prepare(
+      'UPDATE devices SET run_stored = run_stored + 1, run_bytes = run_bytes + ?, total_files = total_files + ?, total_bytes = total_bytes + ? WHERE id = ?',
+    ).run(file.size, replaced ? 0 : 1, file.size, dev.id);
+    const status = replaced ? 'updated' : 'stored';
+    rt.events.emit('device', { deviceId: dev.id, status, path: rel, name: path.basename(rel) }, { userIds: [dev.user_id] });
+    res.json({ ok: true, status, path: rel, message: replaced ? 'Updated' : 'Saved' });
   });
 
   r.post('/api/device/sync-complete', deviceAuth, (req, res) => {
@@ -345,19 +562,20 @@ export function deviceRoutes(rt: Runtime): Router {
     const now = new Date().toISOString();
     rt.requireDb().prepare('UPDATE devices SET last_sync_at = ?, order_warning = ? WHERE id = ?').run(now, outOfOrder ? 1 : 0, d.id);
     const name = rt.settings().serverName;
+    const notes = [d.run_skipped ? `${d.run_skipped} already there` : '', d.run_excluded ? `${d.run_excluded} turned off in this phone’s settings` : ''].filter(Boolean);
     let message =
       d.run_stored > 0
-        ? `Backed up ${d.run_stored} new item${d.run_stored === 1 ? '' : 's'} to ${name}` + (d.run_skipped ? ` (${d.run_skipped} already there)` : '')
-        : 'Everything is already backed up';
-    if (outOfOrder) message += '. Warning: set Find Photos to sort by Creation Date, Oldest First.';
-    if (d.run_stored + d.run_skipped > 0) {
+        ? `Backed up ${d.run_stored} new item${d.run_stored === 1 ? '' : 's'} to ${name}` + (notes.length ? ` (${notes.join(', ')})` : '')
+        : 'Everything is already backed up' + (d.run_excluded ? ` (${notes.at(-1)})` : '');
+    if (outOfOrder) message += '. Warning: set Find Photos to sort by Date Taken, Oldest First.';
+    if (d.run_stored + d.run_skipped + d.run_excluded > 0) {
       logActivity(rt, {
         userId: d.user_id,
         deviceId: d.id,
         action: 'phone_backup',
         space: `u:${d.user_id}`,
         path: d.folder,
-        detail: `${d.name}: ${d.run_stored} new, ${d.run_skipped} already backed up`,
+        detail: `${d.name}: ${d.run_stored} new, ${d.run_skipped} already backed up` + (d.run_excluded ? `, ${d.run_excluded} turned off` : ''),
       });
     }
     rt.events.emit('device', { deviceId: d.id, status: 'complete' }, { userIds: [d.user_id] });
@@ -365,6 +583,7 @@ export function deviceRoutes(rt: Runtime): Router {
       ok: true,
       stored: d.run_stored,
       skipped: d.run_skipped,
+      excluded: d.run_excluded,
       bytes: d.run_bytes,
       backedUpThrough: state.cursor ?? BEGINNING,
       outOfOrder,

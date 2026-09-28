@@ -138,6 +138,27 @@ const MIGRATIONS: string[] = [
   CREATE INDEX activity_at ON activity(at);
   CREATE INDEX activity_user ON activity(user_id, at);
   `,
+  `
+  -- What each phone backs up. Existing phones keep backing up photos, videos and screenshots.
+  ALTER TABLE devices ADD COLUMN backup_photos INTEGER NOT NULL DEFAULT 1;
+  ALTER TABLE devices ADD COLUMN backup_videos INTEGER NOT NULL DEFAULT 1;
+  ALTER TABLE devices ADD COLUMN backup_screenshots INTEGER NOT NULL DEFAULT 1;
+  ALTER TABLE devices ADD COLUMN backup_files INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE devices ADD COLUMN run_excluded INTEGER NOT NULL DEFAULT 0;
+
+  -- Files from the iPhone's Files app. Shortcuts cannot hash, so a file is known by its folder, name and
+  -- creation date, and "changed" means its modification date or size text differs from last time.
+  CREATE TABLE device_files (
+    device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    folder TEXT NOT NULL,
+    name TEXT NOT NULL,
+    created TEXT NOT NULL,
+    signature TEXT NOT NULL,
+    path TEXT NOT NULL,
+    backed_up_at TEXT NOT NULL,
+    PRIMARY KEY (device_id, folder, name, created)
+  );
+  `,
 ];
 
 export function openDb(file: string): Db {
