@@ -264,6 +264,12 @@ test('phone backup: sync-state, upload, dedup, Photos/year/month folders, cursor
   const lost = await phone.req('GET', '/phones', undefined, shortcut);
   assert.equal(lost.status, 404);
   assert.equal(lost.json.error, 'not_phone_api');
+  // The same without relying on the user agent (it differs between iOS versions): no text/html in Accept is enough.
+  const plain = await phone.req('GET', '/pair/abc123/api/device/sync-state', undefined, { ...auth, accept: '*/*' });
+  assert.equal(plain.json.since, '2000-01-01 00:00:00');
+  const nowhere = await phone.req('GET', '/no-such-page', undefined, { accept: '*/*' });
+  assert.equal(nowhere.status, 404);
+  assert.match(nowhere.headers.get('content-type')!, /json/, 'never an HTML error page');
 
   const send = async (name: string, data: string, takenAt: string) => {
     const fd = new FormData();

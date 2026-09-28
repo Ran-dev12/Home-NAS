@@ -1,10 +1,11 @@
 import fs from 'node:fs';
 import http from 'node:http';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express, { type RequestHandler } from 'express';
 import { Runtime } from './runtime.ts';
-import { createApp } from './app.ts';
+import { createApp, wantsPage } from './app.ts';
 import { lanAddresses } from './net.ts';
 
 const appDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -16,6 +17,23 @@ const prod = process.argv.includes('--prod') || process.env.NODE_ENV === 'produc
 const configPath = path.resolve(appDir, arg('--config') ?? process.env.HOMENAS_CONFIG ?? path.join('data', 'config.json'));
 
 const rt = new Runtime({ appDir, configPath, prod });
+
+/** "0.1.0 (c6eb397)": shows at a glance whether this PC runs the latest code after a git pull. */
+function versionLabel(): string {
+  let version = '';
+  try {
+    version = JSON.parse(fs.readFileSync(path.join(appDir, 'package.json'), 'utf8')).version ?? '';
+  } catch {
+    /* unknown */
+  }
+  try {
+    const commit = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: appDir, stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 }).toString().trim();
+    if (commit) version += ` (${commit})`;
+  } catch {
+    /* not a git checkout, or git is not installed */
+  }
+  return version;
+}
 if (arg('--port')) rt.config.port = Number(arg('--port'));
 rt.boot();
 
@@ -35,7 +53,8 @@ if (prod) {
   }
   frontend.push(express.static(dist, { index: false, maxAge: '7d', immutable: true }));
   frontend.push((req, res, next) => {
-    if (req.method !== 'GET' || req.path.startsWith('/api/')) return next();
+    // Only a browser loading a page asks for text/html. Anything else (a shortcut, a script) gets JSON.
+    if (req.method !== 'GET' || req.path.startsWith('/api/') || !wantsPage(req)) return next();
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader(
       'Content-Security-Policy',
@@ -57,6 +76,7 @@ server.listen(rt.config.port, rt.config.host, () => {
   const lines = [
     '',
     '  HomeNAS is running' + (prod ? '' : ' (development mode)'),
+    `  Version:         ${versionLabel()}`,
     `  On this PC:      http://localhost:${port}`,
     ...lanAddresses().map((a) => `  ${a.kind === 'tailscale' ? 'Via Tailscale:  ' : 'On your Wi-Fi:  '} http://${a.address}:${port}`),
     `  Storage:         ${rt.config.storageRoot ?? '(not set up yet)'}${rt.config.storageRoot ? ` [${rt.state}]` : ''}`,

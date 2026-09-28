@@ -16,6 +16,9 @@ const ALWAYS_AVAILABLE = /^\/api\/(status|setup\/|auth\/logout)/;
 /** iOS Shortcuts calls with "BackgroundShortcutRunner/… CFNetwork/…" or "Shortcuts/…"; browsers never do. */
 const fromShortcut = (req: Request) => /Shortcut/i.test(req.get('user-agent') ?? '');
 
+/** A browser loading a page asks for text/html; shortcuts, scripts and the app's own API calls do not. */
+export const wantsPage = (req: Request) => (req.get('accept') ?? '').includes('text/html');
+
 const PHONE_FAILURES: Record<number, string> = {
   401: 'the phone’s key (the Auth text in the shortcut) is wrong or was replaced',
   404: 'the URL in that step of the shortcut is wrong',
@@ -42,14 +45,14 @@ export function createApp(rt: Runtime, frontend: RequestHandler[] = []): express
     const q = req.url.indexOf('?');
     const pathPart = q < 0 ? req.url : req.url.slice(0, q);
     let p = pathPart.includes('//') ? pathPart.replace(/\/{2,}/g, '/') : pathPart;
-    if (fromShortcut(req)) {
-      // A Server address saved with extra bits ("…/pair/…", "…/phones", a space or line break) puts them
-      // in front of "/api/". Answer the API call anyway, and say what to fix.
-      const at = p.indexOf('/api/');
-      if (at > 0) {
-        rt.log(`A phone’s shortcut asked for ${readablePath(p)}. Answering it as ${p.slice(at)}. Fix the shortcut’s Server text: it should be only http://<address>:${rt.config.port}`);
-        p = p.slice(at);
-      }
+    // A Server address saved with extra bits ("…/pair/…", "…/phones", a space or line break) puts them in
+    // front of "/api/". Answer the API call anyway, and say what to fix. Browsers loading pages are left alone.
+    const at = p.indexOf('/api/');
+    if (at > 0 && (!wantsPage(req) || fromShortcut(req))) {
+      rt.log(`A phone’s shortcut asked for ${readablePath(p)}. Answering it as ${p.slice(at)}. Fix the shortcut’s Server text: it should be only http://<address>:${rt.config.port}`);
+      p = p.slice(at);
+    }
+    if (p.startsWith('/api/device/') || fromShortcut(req)) {
       // Problems a phone cannot show clearly (Shortcuts hides the answer) are printed here instead.
       res.on('finish', () => {
         if (res.statusCode < 400) return;
@@ -106,6 +109,13 @@ export function createApp(rt: Runtime, frontend: RequestHandler[] = []): express
   });
 
   for (const h of frontend) app.use(h);
+
+  // Nothing matched. Answer JSON even here: Express's own "Cannot GET" page is HTML, which a shortcut
+  // could only report as "couldn't convert from Text to Dictionary".
+  app.use((req, _res, next) => {
+    if (!wantsPage(req)) rt.log(`Something that is not a browser asked for ${readablePath(req.path)}. If it was a phone, the URL in that step of its shortcut is wrong.`);
+    next(new HttpError(404, 'not_found', `HomeNAS has nothing at “${req.path}”. In a shortcut, the URL must be the Server variable followed directly by /api/device/…`));
+  });
 
   app.use(errorHandler);
   return app;

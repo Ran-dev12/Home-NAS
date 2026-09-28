@@ -375,6 +375,7 @@ export function deviceRoutes(rt: Runtime): Router {
       .prepare('UPDATE devices SET run_started_at = ?, run_stored = 0, run_skipped = 0, run_excluded = 0, run_bytes = 0 WHERE id = ?')
       .run(new Date().toISOString(), d.id);
     const { since, sinceIso } = sinceFor(fresh);
+    rt.log(`${d.name} started a backup (from ${clientIp(req)}).`);
     res.json({
       ok: true,
       device: d.name,
@@ -578,6 +579,7 @@ export function deviceRoutes(rt: Runtime): Router {
         detail: `${d.name}: ${d.run_stored} new, ${d.run_skipped} already backed up` + (d.run_excluded ? `, ${d.run_excluded} turned off` : ''),
       });
     }
+    rt.log(`${d.name}: ${message}.`);
     rt.events.emit('device', { deviceId: d.id, status: 'complete' }, { userIds: [d.user_id] });
     res.json({
       ok: true,
