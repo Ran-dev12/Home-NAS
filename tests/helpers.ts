@@ -5,7 +5,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { Runtime } from '../server/runtime.ts';
-import { createApp } from '../server/app.ts';
+import { answerClientErrors, createApp } from '../server/app.ts';
 
 export interface TestServer {
   rt: Runtime;
@@ -29,6 +29,7 @@ export async function startServer(label: string, opts: { background?: boolean } 
   rt.config.port = 0;
   rt.boot();
   const server = http.createServer(createApp(rt));
+  answerClientErrors(server, rt);
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   return {

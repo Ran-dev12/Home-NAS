@@ -1,6 +1,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import { Client, addUser, setupWithAdmin, startServer, type TestServer } from './helpers.ts';
 
@@ -250,6 +251,10 @@ test('phone backup: sync-state, upload, dedup, Photos/year/month folders, cursor
   const state = await phone.req('GET', '/api/device/sync-state', undefined, auth);
   assert.equal(state.status, 200);
   assert.equal(state.json.since, '2000-01-01 00:00:00');
+  // The key is found however it was pasted.
+  for (const h of [token, `Bearer Bearer ${token}`, `Bearer PASTE-KEY-HERE${token}`]) {
+    assert.equal((await phone.req('GET', '/api/device/sync-state', undefined, { authorization: h })).status, 200, h);
+  }
   // A server address saved with a trailing slash gives "//api/…"; it must still answer JSON, not the web page.
   const slashed = await phone.req('GET', '//api/device/sync-state', undefined, auth);
   assert.equal(slashed.status, 200);
@@ -424,6 +429,22 @@ test('files backup: only new or changed files are uploaded, into Files/<folder>'
   await admin.patch(`/api/devices/${created.json.device.id}`, { backup: { photos: true, files: false } });
   assert.equal((await check(facts)).json.status, 'off');
   assert.equal((await phone.req('POST', '/api/device/file-upload?ticket=nope', new FormData(), auth)).status, 400);
+});
+
+test('a header name with a space ("Authorization ") gets a JSON explanation, not an empty 400', async () => {
+  const { srv } = await fresh('bad-header');
+  const u = new URL(srv.base);
+  const reply = await new Promise<string>((resolve) => {
+    const s = net.connect(Number(u.port), u.hostname, () =>
+      s.write('GET /api/device/sync-state HTTP/1.1\r\nHost: nas\r\nAuthorization : Bearer hn_x\r\nConnection: close\r\n\r\n'),
+    );
+    let d = '';
+    s.on('data', (c) => (d += c));
+    s.on('end', () => resolve(d));
+  });
+  assert.match(reply, /^HTTP\/1\.1 400/);
+  assert.match(reply, /application\/json/);
+  assert.match(reply, /“Authorization”/);
 });
 
 test('unplugging the drive takes the NAS offline; plugging it back brings it online', async () => {

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express, { type RequestHandler } from 'express';
 import { Runtime } from './runtime.ts';
-import { createApp, wantsPage } from './app.ts';
+import { answerClientErrors, createApp, wantsPage } from './app.ts';
 import { lanAddresses } from './net.ts';
 
 const appDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -70,6 +70,7 @@ if (prod) {
 }
 
 server.on('request', createApp(rt, frontend));
+answerClientErrors(server, rt);
 
 server.listen(rt.config.port, rt.config.host, () => {
   const port = rt.config.port;

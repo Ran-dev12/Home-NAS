@@ -32,6 +32,8 @@ Optional: install **ffmpeg** (`winget install Gyan.FFmpeg`) for video thumbnails
 
 Phones → **Add phone** asks what this phone should back up (photos, videos, screenshots, files and folders; change it later under the phone’s menu → *What to back up…*), then gives a QR code. Scan it with the iPhone camera and the setup steps open on the phone, with copy buttons for everything. You build the shortcut once (about five minutes) and add an automation, *When charger connects → Run Immediately*. From then on it is **automatic**: every time the phone charges at home it backs up and shows “Backed up 12 new items”. An optional second automation at, say, 3:00 AM catches phones that sit on the charger all evening.
 
+**Ready-made shortcut.** Instead of building the shortcut by hand, run `python3 scripts/make-shortcut.py --server http://<NAS address>:4300` on a Mac. It writes a signed `HomeNAS Backup.shortcut` (photos, videos and screenshots) to AirDrop to the iPhone; on import it asks for the address and the phone’s key.
+
 **Adding more phones.** Each phone gets its own key and its own folder. The person it belongs to signs in (Admin → Users adds people) and chooses Phones → Add phone. You do not rebuild the shortcut: the NAS address and the key each live in a single Text action at the top of it, so you share the finished shortcut from the first iPhone by iCloud link (with the key temporarily replaced by a placeholder), and on the new phone paste its own key into that one line. The setup page walks through this.
 
 Each phone’s backups land in their own tree, sorted by kind:

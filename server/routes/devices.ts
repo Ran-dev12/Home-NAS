@@ -351,8 +351,10 @@ export function deviceRoutes(rt: Runtime): Router {
   function deviceAuth(req: Request, _res: Response, next: NextFunction) {
     const ip = clientIp(req);
     tokenLimiter.check(ip);
-    const header = req.get('authorization') ?? '';
-    const token = (/^Bearer\s+(.+)$/i.exec(header)?.[1] ?? req.get('x-device-token') ?? '').trim();
+    // Keys look like hn_<base64url>. Find one anywhere in the header, so "hn_…" without "Bearer", or a key
+    // pasted next to leftover placeholder text, still works.
+    const header = `${req.get('authorization') ?? ''} ${req.get('x-device-token') ?? ''}`;
+    const token = /hn_[A-Za-z0-9_-]+/.exec(header)?.[0] ?? '';
     const row = token
       ? (rt.requireDb()
           .prepare('SELECT d.*, u.disabled AS user_disabled FROM devices d JOIN users u ON u.id = d.user_id WHERE d.token_hash = ?')

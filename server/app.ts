@@ -1,3 +1,5 @@
+import type http from 'node:http';
+import type { Duplex } from 'node:stream';
 import express, { type Request, type RequestHandler } from 'express';
 import type { Runtime } from './runtime.ts';
 import { SESSION_COOKIE, csrfGuard, lookupSession, parseCookies } from './auth.ts';
@@ -31,6 +33,24 @@ function readablePath(p: string): string {
   } catch {
     return JSON.stringify(p);
   }
+}
+
+/**
+ * Node rejects a request whose header name has a space in it (a shortcut header typed as "Authorization ")
+ * before HomeNAS sees it, with an empty 400 that Shortcuts reports as "couldn't convert from Text to
+ * Dictionary". Answer such requests with JSON that says what is wrong, and print it in the HomeNAS window.
+ */
+export function answerClientErrors(server: http.Server, rt: Runtime) {
+  server.on('clientError', (err: NodeJS.ErrnoException, socket: Duplex) => {
+    if (err.code === 'ECONNRESET' || !socket.writable) return socket.destroy();
+    const badHeader = err.code === 'HPE_INVALID_HEADER_TOKEN';
+    const message = badHeader
+      ? 'A header name in this request has a space or a character that is not allowed. In the shortcut, check the header key “Authorization” for a space at the end.'
+      : 'HomeNAS could not read this request.';
+    rt.log(badHeader ? 'A phone sent a header whose name has a space in it (probably “Authorization ” with a space at the end). Fix that header key in the shortcut.' : `Unreadable request (${err.code ?? err.message}).`);
+    const body = JSON.stringify({ error: 'bad_request', message });
+    socket.end(`HTTP/1.1 400 Bad Request\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`);
+  });
 }
 
 export function createApp(rt: Runtime, frontend: RequestHandler[] = []): express.Express {
