@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "homenas-dev",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["--watch-path=server", "server/index.ts", "--config", "data/dev-config.json", "--port", "4390"],
+      "port": 4390
+    }
+  ]
+}

@@ -1,1 +1,111 @@
-@import "tailwindcss";
+@import 'tailwindcss';
+
+/* Semantic tokens. Components only use these names, never raw colours, so dark mode is one block below. */
+@theme inline {
+  --color-bg: var(--c-bg);
+  --color-fg: var(--c-fg);
+  --color-card: var(--c-card);
+  --color-subtle: var(--c-subtle);
+  --color-muted: var(--c-muted);
+  --color-line: var(--c-line);
+  --color-primary: var(--c-primary);
+  --color-primary-solid: var(--c-primary-solid);
+  --color-primary-solid-hover: var(--c-primary-solid-hover);
+  --color-primary-fg: var(--c-primary-fg);
+  --color-primary-soft: var(--c-primary-soft);
+  --color-danger: var(--c-danger);
+  --color-danger-soft: var(--c-danger-soft);
+  --color-danger-solid: var(--c-danger-solid);
+  --color-warn: var(--c-warn);
+  --color-warn-soft: var(--c-warn-soft);
+  --color-ok: var(--c-ok);
+  --color-ok-soft: var(--c-ok-soft);
+  --color-folder: var(--c-folder);
+  --color-file: var(--c-file);
+  /* A LAN appliance must work with no internet: system fonts only. */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Mono', 'Segoe UI Mono', Consolas, Menlo, monospace;
+}
+
+:root {
+  color-scheme: light;
+  --c-bg: #f8fafc;
+  --c-fg: #0f172a;
+  --c-card: #ffffff;
+  --c-subtle: #f1f5f9;
+  --c-muted: #475569;
+  --c-line: #e2e8f0;
+  --c-primary: #2563eb;
+  /* Filled buttons: white text stays above 4.5:1 in both themes. */
+  --c-primary-solid: #2563eb;
+  --c-primary-solid-hover: #1d4ed8;
+  --c-primary-fg: #ffffff;
+  --c-primary-soft: #dbeafe;
+  --c-danger: #dc2626;
+  --c-danger-soft: #fee2e2;
+  /* Destructive buttons keep white text readable (4.5:1) in both themes. */
+  --c-danger-solid: #dc2626;
+  --c-warn: #b45309;
+  --c-warn-soft: #fef3c7;
+  --c-ok: #15803d;
+  --c-ok-soft: #dcfce7;
+  --c-folder: #3b82f6;
+  --c-file: #d97706;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --c-bg: #0b1120;
+    --c-fg: #e2e8f0;
+    --c-card: #111827;
+    --c-subtle: #1e293b;
+    --c-muted: #94a3b8;
+    --c-line: #243044;
+    --c-primary: #3b82f6;
+    --c-primary-fg: #ffffff;
+    --c-primary-soft: #172554;
+    --c-danger: #f87171;
+    --c-danger-soft: #3f1212;
+    --c-warn: #fbbf24;
+    --c-warn-soft: #3a2a07;
+    --c-ok: #4ade80;
+    --c-ok-soft: #0f2e1a;
+    --c-folder: #60a5fa;
+    --c-file: #f59e0b;
+  }
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  @apply bg-bg text-fg font-sans antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--c-primary);
+  outline-offset: 2px;
+}
+
+dialog::backdrop {
+  background: rgb(2 6 23 / 0.55);
+}
+
+dialog {
+  color: inherit;
+}
+
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
