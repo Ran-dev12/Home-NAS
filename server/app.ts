@@ -1,4 +1,4 @@
-import express, { type RequestHandler } from 'express';
+import express, { type Request, type RequestHandler } from 'express';
 import type { Runtime } from './runtime.ts';
 import { SESSION_COOKIE, csrfGuard, lookupSession, parseCookies } from './auth.ts';
 import { HttpError, errorHandler } from './http.ts';
@@ -13,13 +13,51 @@ import { eventRoutes } from './routes/events.ts';
 /** API paths that must answer even while the drive is unplugged or HomeNAS is not set up. */
 const ALWAYS_AVAILABLE = /^\/api\/(status|setup\/|auth\/logout)/;
 
+/** iOS Shortcuts calls with "BackgroundShortcutRunner/… CFNetwork/…" or "Shortcuts/…"; browsers never do. */
+const fromShortcut = (req: Request) => /Shortcut/i.test(req.get('user-agent') ?? '');
+
+const PHONE_FAILURES: Record<number, string> = {
+  401: 'the phone’s key (the Auth text in the shortcut) is wrong or was replaced',
+  404: 'the URL in that step of the shortcut is wrong',
+  503: 'HomeNAS is not set up yet, or the storage drive is unplugged',
+};
+
+function readablePath(p: string): string {
+  try {
+    return JSON.stringify(decodeURI(p)); // quotes it and shows a stray line break as \n
+  } catch {
+    return JSON.stringify(p);
+  }
+}
+
 export function createApp(rt: Runtime, frontend: RequestHandler[] = []): express.Express {
   const app = express();
   app.disable('x-powered-by');
 
-  app.use((_req, res, next) => {
+  app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'same-origin');
+    // A server address typed with a trailing slash makes a shortcut call "//api/...". Without this, that
+    // misses the API and gets the web page back, which Shortcuts reports as "couldn't convert from Text".
+    const q = req.url.indexOf('?');
+    const pathPart = q < 0 ? req.url : req.url.slice(0, q);
+    let p = pathPart.includes('//') ? pathPart.replace(/\/{2,}/g, '/') : pathPart;
+    if (fromShortcut(req)) {
+      // A Server address saved with extra bits ("…/pair/…", "…/phones", a space or line break) puts them
+      // in front of "/api/". Answer the API call anyway, and say what to fix.
+      const at = p.indexOf('/api/');
+      if (at > 0) {
+        rt.log(`A phone’s shortcut asked for ${readablePath(p)}. Answering it as ${p.slice(at)}. Fix the shortcut’s Server text: it should be only http://<address>:${rt.config.port}`);
+        p = p.slice(at);
+      }
+      // Problems a phone cannot show clearly (Shortcuts hides the answer) are printed here instead.
+      res.on('finish', () => {
+        if (res.statusCode < 400) return;
+        const why = PHONE_FAILURES[res.statusCode] ?? 'see the message on the phone';
+        rt.log(`Phone request ${req.method} ${req.originalUrl.split('?')[0]} failed (${res.statusCode}): ${why}.`);
+      });
+    }
+    if (p !== pathPart) req.url = p + (q < 0 ? '' : req.url.slice(q));
     next();
   });
 
@@ -60,6 +98,12 @@ export function createApp(rt: Runtime, frontend: RequestHandler[] = []): express
   app.use(eventRoutes(rt));
 
   app.use('/api', (_req, _res, next) => next(new HttpError(404, 'not_found', 'Unknown API endpoint')));
+
+  // A shortcut must never get the web page: Shortcuts would only say it "couldn't convert from Text".
+  app.use((req, _res, next) => {
+    if (!fromShortcut(req)) return next();
+    next(new HttpError(404, 'not_phone_api', `HomeNAS got a request for “${req.path}”. In the shortcut, the URL must be the Server variable followed directly by /api/device/…`));
+  });
 
   for (const h of frontend) app.use(h);
 

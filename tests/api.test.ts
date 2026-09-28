@@ -250,6 +250,20 @@ test('phone backup: sync-state, upload, dedup, Photos/year/month folders, cursor
   const state = await phone.req('GET', '/api/device/sync-state', undefined, auth);
   assert.equal(state.status, 200);
   assert.equal(state.json.since, '2000-01-01 00:00:00');
+  // A server address saved with a trailing slash gives "//api/…"; it must still answer JSON, not the web page.
+  const slashed = await phone.req('GET', '//api/device/sync-state', undefined, auth);
+  assert.equal(slashed.status, 200);
+  assert.equal(slashed.json.since, '2000-01-01 00:00:00');
+  // Common ways a Server address gets saved wrong. A shortcut must get the API (or a JSON error), never the web page.
+  const shortcut = { ...auth, 'user-agent': 'BackgroundShortcutRunner/3600.0.1 CFNetwork/3860.100.1 Darwin/25.0.0' };
+  for (const bad of ['/pair/abc123/api/device/sync-state', '/phones/api/device/sync-state', '/%20/api/device/sync-state', '/%0A/api/device/sync-state']) {
+    const r = await phone.req('GET', bad, undefined, shortcut);
+    assert.equal(r.status, 200, bad);
+    assert.equal(r.json.since, '2000-01-01 00:00:00', bad);
+  }
+  const lost = await phone.req('GET', '/phones', undefined, shortcut);
+  assert.equal(lost.status, 404);
+  assert.equal(lost.json.error, 'not_phone_api');
 
   const send = async (name: string, data: string, takenAt: string) => {
     const fd = new FormData();

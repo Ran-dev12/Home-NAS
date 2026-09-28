@@ -261,7 +261,10 @@ export function ShortcutGuide(p: GuideProps) {
               </Step>
               <Step n={next()} title={<>Add <Action>Find Photos</Action></>}>
                 <span>
-                  Add filter: <Code>Date Taken</Code> <Code>is after</Code> the <Code>Dates</Code> variable (tap the date, choose Select Variable). Older iOS versions call it <Code>Creation Date</Code>.
+                  Add filter: <Code>Date Taken</Code> <Code>is after</Code> the <Code>Dates</Code> variable. Depending on the iOS version the filter is called <Code>Date Created</Code> or <Code>Creation Date</Code>.
+                </span>
+                <span>
+                  The date must be the blue <Var>Dates</Var> variable, not a fixed date: tap the date, choose <b className="text-fg">Select Variable</b>, then tap <Code>Dates</Code> from Get Dates from Input.
                 </span>
                 {filters.map((f, i) => (
                   <span key={i}>Add another filter: {f}.</span>
@@ -273,14 +276,14 @@ export function ShortcutGuide(p: GuideProps) {
                 )}
                 {nasSkips && <span>Leave out any media filter: the NAS skips the {nasSkips} for you.</span>}
                 <span>
-                  Sort by <Code>Date Taken</Code>, order <b className="text-fg">Oldest First</b>. Turn on Limit and set it to <Code>{p.limit}</Code>.
+                  Sort by the same date (<Code>Date Taken</Code> / <Code>Date Created</Code>), order <b className="text-fg">Oldest First</b>. Turn on Limit and set it to <Code>{p.limit}</Code>.
                 </span>
                 <Notice tone="warn">Oldest First matters. It lets an interrupted backup continue where it stopped. Newest first would make the NAS re-check the same photos every time.</Notice>
               </Step>
               <Step n={next()} title={<>Add <Action>Repeat with Each</Action> with input <Code>Photos</Code>. Inside the repeat, add:</>}>
                 <ol className="flex flex-col gap-3 border-l-2 border-line pl-4">
                   <li>
-                    <Action>Format Date</Action>: date <Code>Repeat Item → Date Taken</Code> (or Creation Date), format <Code>ISO 8601</Code>, turn on <b className="text-fg">Include ISO 8601 Time</b>.
+                    <Action>Format Date</Action>: date <Code>Repeat Item → Date Taken</Code> (or Date Created), format <Code>ISO 8601</Code>, turn on <b className="text-fg">Include ISO 8601 Time</b>.
                   </li>
                   <li className="flex flex-col gap-2">
                     <span>
@@ -467,6 +470,9 @@ export function ShortcutGuide(p: GuideProps) {
             the PC.
           </li>
           <li>Keep the NAS on and give it a fixed address in your router (a DHCP reservation). If its address changes, change only the first Text action.</li>
+          <li>
+            Something fails? The HomeNAS window on the PC prints every phone request that goes wrong, with the reason (wrong key, wrong address). The first Text action must hold only the address, like <Code>{p.baseUrl}</Code>.
+          </li>
         </ul>
       </section>
     </div>
